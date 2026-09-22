@@ -263,7 +263,7 @@ export function finishLamps() {
         vI *= 0.25 + 0.75 * smoothstep(12.0, 45.0, distance(cameraPosition, position));
         gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0); }`,
     fragmentShader: `uniform sampler2D tMap; varying vec2 vUv; varying float vI; varying vec3 vC;
-      void main(){ float t = texture2D(tMap, vUv).r; float a = t * t * t * vI * 0.3; gl_FragColor = vec4(vC * a, a); }`
+      void main(){ float t = texture2D(tMap, vUv).a; float a = t * t * vI * 0.62; gl_FragColor = vec4(vC * a, a); }`
   });
   poolMesh = new THREE.Mesh(pg, pm);
   poolMesh.frustumCulled = false; poolMesh.renderOrder = 3;
