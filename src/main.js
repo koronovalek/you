@@ -7,7 +7,7 @@ import { buildHeightCache, hFast } from './world/heightcache.js';
 import { buildTerrain } from './world/terrain.js';
 import { buildSky, updateSky, SKY, TIME, nextPhase, fmtTime } from './world/sky.js';
 import { buildForest, updateForestLOD, forestStats } from './world/forest.js';
-import { buildGrass, buildUndergrowth, refreshGrass, GRASS } from './world/groundcover.js';
+import { buildGrass, buildUndergrowth, refreshGrass, finishGrass, GRASS, updateUndergrowth } from './world/groundcover.js';
 import { buildLake, updateLake, planPiers } from './world/lake.js';
 import { planBuildings, buildBuildings, HOUSES } from './world/buildings.js';
 import { planMilitary, buildMilitary, FIRES, MINES } from './world/military.js';
@@ -22,6 +22,14 @@ import { initAudio, updateAudio, AUDIO } from './fx/audio.js';
 import { buildPost, updatePost, resizePost, composer } from './fx/post.js';
 import { PL, keys, spawnAt, setMode, look, updatePlayer, dropBomb, startCinematic, stopCinematic } from './game/player.js';
 import { buildMapOverlay, updateHud, toast } from './game/hud.js';
+import { buildBushes, updateBushes, bushStats } from './world/bushes.js';
+import { buildDestruct, updateDestruct, destructStats } from './world/destruct.js';
+import { bakeGroundAO } from './world/terrain.js';
+import { TREES, forestDensity } from './world/forest.js';
+import { SOFTS } from './core/colliders.js';
+import { lakeRho, lakeContour } from './world/layout.js';
+import { updateLife, buildLife } from './world/life.js';
+import { PERF, updatePerf, initPerf } from './core/perf.js';
 
 /* ============================================================================
    «ТИХИЙ БОР» — сборка сцены и главный цикл
@@ -35,14 +43,15 @@ const STEPS = [
   ['Рельеф: сетка', () => buildTerrain()],
   ['Небо и свет', () => buildSky()],
   ['Хвойный лес', () => buildForest()],
-  ['Подлесок и трава', () => { buildUndergrowth(); buildGrass(); }],
+  ['Подлесок, кусты и трава', () => { buildUndergrowth(); buildBushes(); buildGrass(); }],
   ['Озеро, камыш, мостки', () => buildLake()],
   ['Турбаза и кордон', () => buildBuildings()],
   ['Окопы, базы, минное поле', () => buildMilitary()],
   ['Техника и укрытия', () => buildProps()],
   ['Фонари', () => { buildLamps(); finishLamps(); }],
-  ['Частицы и взрывы', () => { buildParticles(); buildExplosions(); }],
-  ['Сборка геометрии', () => { draws = flushStatic(); buildPost(); buildMapOverlay(); }],
+  ['Частицы и взрывы', () => { buildParticles(); buildExplosions(); buildLife(); }],
+  ['Разрушаемость', () => buildDestruct()],
+  ['Сборка геометрии', () => { finishGrass(); bakeGroundAO(TREES, COLLIDERS); draws = flushStatic(); buildPost(); initPerf(); buildMapOverlay(); }],
   ['Компиляция шейдеров', () => { spawnAt('A', 'drone'); updatePlayer(0); updateSky(0); renderer.compile(scene, camera); }]
 ];
 
@@ -79,13 +88,14 @@ function finish() {
     setTime: h => { TIME.h = h; updateSky(0); },
     teleport: (x, y, z, yaw = PL.yaw, pitch = PL.pitch) => { PL.pos.set(x, y, z); PL.vel.set(0, 0, 0); PL.yaw = yaw; PL.pitch = pitch; stopCinematic(); },
     lookAt: (x, y, z) => { const dx = x - PL.pos.x, dy = y - PL.pos.y, dz = z - PL.pos.z; PL.yaw = Math.atan2(-dx, -dz); PL.pitch = Math.atan2(dy, Math.hypot(dx, dz)); },
-    step: dt => frame(dt), explode, setMode, spawnAt, startCinematic, terrainH, map: MAP, spawns: SPAWNS,
+    step: dt => frame(dt), explode, setMode, trees: TREES, spawnAt, startCinematic, terrainH, map: MAP, spawns: SPAWNS,
     // логика без отрисовки: для автотестов на медленных машинах
-    simulate: (dt, n = 1) => { for (let i = 0; i < n; i++) { FRAME.t += dt; updatePlayer(dt); updateExplosions(dt); } return PL; },
+    simulate: (dt, n = 1) => { for (let i = 0; i < n; i++) { FRAME.t += dt; FRAME.n++; updatePlayer(dt); updateExplosions(dt); updateDestruct(dt); updateBarrels(dt); } return PL; },
     stats: () => ({
       calls: renderer.info.render.calls, tris: renderer.info.render.triangles, grass: GRASS.count,
       ...forestStats(), colliders: COLLIDERS.length, houses: HOUSES.length, cloths: CLOTHS.length, barrels: BARRELS.length,
-      mines: MINES.list.length, paths: PATHS.length, trenches: TRENCHES.length, staticDraws: draws, ...lampStats(), quality: QNAME
+      mines: MINES.list.length, paths: PATHS.length, trenches: TRENCHES.length, staticDraws: draws, ...lampStats(), quality: QNAME,
+      ...bushStats(), ...destructStats(), softs: SOFTS.length, scale: PERF.scale, frameMs: PERF.ms
     })
   };
   $('#g_load').style.display = 'none';
@@ -104,7 +114,8 @@ function finish() {
   $('#g_go').onclick = () => { spawnAt(PL.team, 'drone'); enter(); };
   $('#g_cine').onclick = () => { spawnAt(PL.team, 'drone'); startCinematic(); enter(); };
   window.MAP_READY = true;
-  requestAnimationFrame(loop);
+  // ?shot — без главного цикла: кадры шагаются вручную через MAP_API.step (автотесты, скриншоты)
+  if (!new URLSearchParams(location.search).has('shot')) requestAnimationFrame(loop);
 }
 function enter() {
   initAudio();
@@ -170,6 +181,10 @@ function frame(dt) {
   updateLamps(SKY.lampOn);
   updateForestLOD();
   refreshGrass();
+  updateUndergrowth();
+  updateBushes();
+  updateDestruct(dt);
+  updateLife(dt, SKY);
   stepCloth(dt, FRAME.t);
   updateBarrels(dt);
   emitFires(FIRES, dt, SKY);
@@ -179,15 +194,40 @@ function frame(dt) {
   updateLake(SKY);
   searchlight.intensity = PL.light ? (PL.mode === 'drone' ? 260 : 60) : 0;
   searchlight.angle = PL.mode === 'drone' ? 0.34 : 0.5;
-  updateAudio(dt, { night: SKY.night, wind: WIND.strength, agl: PL.agl, drone: PL.mode === 'drone' && PL.dead <= 0, speed: PL.vel.length() });
+  updateAudio(dt, audioState());
   updatePost(SKY, Math.min(1, BLAST.shake * 0.8 + (PL.dead > 0 ? 0.6 : 0)));
+  renderer.info.autoReset = false;
+  renderer.info.reset();
   composer.render();
   updateHud(dt);
 }
+/** Состояние для звука: где слушатель, что вокруг — лес, вода, кусты. */
+const _fwd = new THREE.Vector3(), _shore = { x: 0, z: 0, d: 999 };
+let shoreT = 0;
+function audioState() {
+  const cp = camera.position;
+  camera.getWorldDirection(_fwd);
+  // ближайшая точка уреза: грубый поиск по контуру раз в 0.25 с
+  if (FRAME.t - shoreT > 0.25) {
+    shoreT = FRAME.t;
+    let best = 1e9;
+    for (let i = 0; i < 96; i++) {
+      const [x, z] = lakeContour(i / 96 * Math.PI * 2, 0), d = Math.hypot(x - cp.x, z - cp.z);
+      if (d < best) { best = d; _shore.x = x; _shore.z = z; }
+    }
+    _shore.d = lakeRho(cp.x, cp.z) < 1 ? Math.min(best, 6) : best;
+  }
+  return {
+    night: SKY.night, h: TIME.h, wind: WIND.strength, gust: WIND.gust, agl: PL.agl, drone: PL.mode === 'drone' && PL.dead <= 0,
+    speed: PL.vel.length(), pos: cp, fwd: _fwd, canopy: forestDensity(cp.x, cp.z), shore: _shore, brush: PL.brush || 0
+  };
+}
 function loop() {
   requestAnimationFrame(loop);
-  const dt = Math.min(clock.getDelta(), 0.05);
+  const raw = clock.getDelta();
+  const dt = Math.min(raw, 0.05);
   frame(dt);
+  updatePerf(raw);
   fpsAcc += dt; fpsN++; fpsT += dt;
   if (fpsT > 0.5) {
     const el = $('#fps');

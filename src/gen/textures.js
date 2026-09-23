@@ -318,6 +318,45 @@ export function birchAtlas() {
   sharpenAlpha(c, 0.45); bleedColor(c, 3);
   return tex(c);
 }
+/** Листва кустов (лещина, ива, крушина): ветки с овальными листьями и жилкой.
+    Четыре квадранта — разный тон и форма листа. */
+export function bushLeafAtlas() {
+  const S = TS(512), [c, x] = cv(S), K = S / 512;
+  const kinds = [
+    { hue: [74, 104, 40], w: 0.62, n: 26 },   // лещина — широкий лист
+    { hue: [92, 116, 58], w: 0.3, n: 38 },    // ива — узкий серебристый
+    { hue: [60, 92, 36], w: 0.5, n: 30 },     // крушина — тёмный
+    { hue: [104, 118, 44], w: 0.55, n: 28 }   // осветлённый край, осенние пятна
+  ];
+  x.lineCap = 'round';
+  kinds.forEach((kd, q) => {
+    const ox = (q % 2) * S / 2, oy = Math.floor(q / 2) * S / 2, W = S / 2;
+    x.save(); x.translate(ox, oy); x.beginPath(); x.rect(0, 0, W, W); x.clip();
+    // веточка по диагонали, листья вдоль неё
+    x.strokeStyle = 'rgb(84,64,44)'; x.lineWidth = 2.4 * K;
+    x.beginPath(); x.moveTo(W * 0.5, W * 0.98); x.quadraticCurveTo(W * 0.46, W * 0.5, W * 0.52, W * 0.06); x.stroke();
+    for (let i = 0; i < kd.n; i++) {
+      const t = srnd(), bx = W * (0.5 + Math.sin(t * 3) * 0.03), by = W * (0.95 - t * 0.88);
+      const a = -Math.PI / 2 + (srnd() < 0.5 ? -1 : 1) * sr(0.5, 1.4);
+      const L = sr(30, 52) * K * (1 - t * 0.3), wv = L * kd.w * 0.5;
+      const px = bx + Math.cos(a) * L * 0.55, py = by + Math.sin(a) * L * 0.55;
+      const v = sr(0.72, 1.25), autumn = q === 3 && srnd() < 0.15;
+      const col = autumn ? [150 * v, 120 * v, 40 * v] : [kd.hue[0] * v, kd.hue[1] * v, kd.hue[2] * v];
+      x.save(); x.translate(px, py); x.rotate(a + Math.PI / 2);
+      x.fillStyle = rgba(col[0], col[1], col[2], 1);
+      x.beginPath(); x.moveTo(0, L * 0.5); x.quadraticCurveTo(wv * 1.3, L * 0.05, 0, -L * 0.5); x.quadraticCurveTo(-wv * 1.3, L * 0.05, 0, L * 0.5); x.fill();
+      // светлая жилка и полутень одной половины листа
+      x.fillStyle = 'rgba(0,0,0,0.12)';
+      x.beginPath(); x.moveTo(0, L * 0.5); x.quadraticCurveTo(wv * 1.3, L * 0.05, 0, -L * 0.5); x.closePath(); x.fill();
+      x.strokeStyle = rgba(col[0] * 1.35, col[1] * 1.3, col[2] * 1.2, 0.9); x.lineWidth = 1.1 * K;
+      x.beginPath(); x.moveTo(0, L * 0.5); x.lineTo(0, -L * 0.45); x.stroke();
+      x.restore();
+    }
+    x.restore();
+  });
+  sharpenAlpha(c, 0.45); bleedColor(c, 3);
+  return tex(c);
+}
 /** Пучок лесной травы: узкие стебли разной высоты. */
 export function grassTex() {
   const W = TS(128), H = TS(256), [c, x] = cv(W, H);
@@ -678,11 +717,17 @@ export function waterNormals() {
   const S = TS(512), [h, hx] = cv(S);
   const img = hx.createImageData(S, S), d = img.data;
   const waves = [];
-  for (let i = 0; i < 18; i++) waves.push({ kx: si(-7, 7), ky: si(-7, 7), a: sr(0.3, 1), p: sr(0, TAU) });
+  // спектр ряби: длинные волны сильнее, короткие слабее (~1/k), направления вразброс
+  for (let i = 0; i < 46; i++) {
+    let kx = si(-16, 16), ky = si(-16, 16);
+    if (!kx && !ky) kx = 1;
+    const k = Math.hypot(kx, ky);
+    waves.push({ kx, ky, a: sr(0.5, 1) / Math.pow(k, 0.9), p: sr(0, TAU) });
+  }
   for (let y = 0; y < S; y++) for (let x = 0; x < S; x++) {
     let v = 0;
     for (const w of waves) v += Math.sin((w.kx * x + w.ky * y) / S * TAU + w.p) * w.a;
-    const i = (y * S + x) * 4, g = clamp(128 + v * 12, 0, 255);
+    const i = (y * S + x) * 4, g = clamp(128 + v * 30, 0, 255);
     d[i] = d[i + 1] = d[i + 2] = g; d[i + 3] = 255;
   }
   hx.putImageData(img, 0, 0);

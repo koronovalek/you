@@ -20,7 +20,26 @@ function foliage(map, o = {}) {
   });
   // Лёгкая «просвечиваемость»: тыльная сторона карточки не проваливается в черноту.
   m.emissive = new THREE.Color(o.glow ?? 0x0b1206);
-  return m;
+  return addTranslucency(m, o.trans ?? 1.1);
+}
+/** Просвечивание: лист или травинка против солнца светится тёплым контровым
+    светом. directLight после цикла источников — солнце уже с тенью, поэтому
+    затенённая листва не «горит». */
+export function addTranslucency(mat, k = 1) {
+  const prev = mat.onBeforeCompile;
+  mat.onBeforeCompile = (sh, r) => {
+    if (prev) prev(sh, r);
+    sh.fragmentShader = sh.fragmentShader.replace('#include <lights_fragment_begin>', `#include <lights_fragment_begin>
+      #if NUM_DIR_LIGHTS > 0
+      {
+        float back = pow(max(dot(normalize(-vViewPosition), directLight.direction), 0.0), 4.0);
+        reflectedLight.directDiffuse += diffuseColor.rgb * directLight.color * (back * ${k.toFixed(3)} + 0.06);
+      }
+      #endif`);
+  };
+  const key = mat.customProgramCacheKey();
+  mat.customProgramCacheKey = () => key + '|tl' + k;
+  return mat;
 }
 /** Материал глубины для теней листвы: учитывает альфу и тот же ветер. */
 export function depthFor(mat, wind) {
@@ -54,6 +73,7 @@ export function buildMaterials() {
   M.birch = foliage(TEX.birch, { rough: 0.8, glow: 0x101806 });
 
   M.grass = foliage(TX.grassTex(), { alphaTest: 0.45, rough: 0.95, glow: 0x0a1206 });
+  M.bush = foliage(TX.bushLeafAtlas(), { alphaTest: 0.5, rough: 0.7, glow: 0x0b1406, trans: 1.4 });
   M.fern = foliage(TX.fernTex(), { alphaTest: 0.45, glow: 0x0a1406 });
   M.shrub = foliage(TX.shrubTex(), { alphaTest: 0.45, glow: 0x081006 });
   M.reed = foliage(TX.reedTex(), { alphaTest: 0.45, rough: 0.8, glow: 0x0c1206 });

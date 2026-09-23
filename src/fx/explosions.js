@@ -10,6 +10,7 @@ import { boom, tinnitus } from './audio.js';
 import { blastBarrels } from '../world/props.js';
 import { nudgeCloth } from '../world/cloth.js';
 import { addRipple } from '../world/lake.js';
+import { blastDestruct } from '../world/destruct.js';
 
 /* ============================================================================
    ВЗРЫВЫ: мины, сброс с дрона
@@ -52,7 +53,8 @@ function crater(x, z, r) {
 
 /** kind: 'pmn' (противопехотная), 'tm' (противотанковая), 'ozm', 'vog' (сброс с дрона). */
 export function explode(x, y, z, kind = 'pmn') {
-  const size = kind === 'tm' ? 2.2 : kind === 'ozm' ? 1.3 : kind === 'vog' ? 0.8 : 1;
+  const size = kind === 'tm' ? 2.2 : kind === 'ozm' ? 1.3 : kind === 'vog' ? 0.8 : kind === 'fuel' ? 1.4 : 1;
+  const fuel = kind === 'fuel';
   const water = lakeRho(x, z) < 0.98 && y < MAP.WATER_Y + 0.6;
   const gy = water ? MAP.WATER_Y : terrainH(x, z);
   BLAST.last = { x, y: gy, z, t: FRAME.t, size };
@@ -65,6 +67,16 @@ export function explode(x, y, z, kind = 'pmn') {
     const a = srnd() * TAU, u = srnd();
     FX.add.spawn({ x: x + Math.cos(a) * 0.3, y: gy + 0.4 + u, z: z + Math.sin(a) * 0.3, vx: Math.cos(a) * sr(1, 5) * size, vy: sr(2, 8) * size, vz: Math.sin(a) * sr(1, 5) * size,
       size: sr(0.8, 1.8) * size, grow: 3 * size, life: sr(0.18, 0.4), col: [3.2, 1.9, 0.8], a: 1, cool: 0.35, drag: 3 });
+  }
+  if (fuel) {
+    // топливо: клубящийся огненный гриб, поднимается и темнеет в копоть
+    for (let i = 0; i < 34; i++) {
+      const a = srnd() * TAU, r = sr(0, 1.2);
+      FX.add.spawn({ x: x + Math.cos(a) * r, y: y + sr(0, 1.5), z: z + Math.sin(a) * r, vx: Math.cos(a) * sr(0.5, 3), vy: sr(4, 11), vz: Math.sin(a) * sr(0.5, 3),
+        size: sr(1.4, 2.8), grow: 2.4, life: sr(0.7, 1.4), col: [3.0, 1.5, 0.5], a: 1, cool: 0.3, drag: 2.2 });
+    }
+    for (let i = 0; i < 22; i++) FX.alpha.spawn({ x: x + sr(-1, 1), y: y + sr(2, 6), z: z + sr(-1, 1), vx: sr(-0.6, 0.6), vy: sr(2, 5), vz: sr(-0.6, 0.6),
+      size: sr(2, 3.5), grow: 1.6, life: sr(6, 11), col: [0.08, 0.075, 0.07], a: 0.6, fadeIn: 0.5, windK: 1.2, drag: 0.7 });
   }
   // искры
   for (let i = 0; i < 18 * size; i++) {
@@ -94,17 +106,27 @@ export function explode(x, y, z, kind = 'pmn') {
       BLAST.chunks.push({ p: new THREE.Vector3(x, gy + 0.2, z), v: new THREE.Vector3(Math.cos(a) * Math.cos(e) * sp, Math.sin(e) * sp, Math.sin(a) * Math.cos(e) * sp), life: sr(2.5, 4.5), s: sr(0.6, 1.6), r: new THREE.Euler(srnd() * 6, srnd() * 6, 0) });
     }
     if (BLAST.chunks.length > 220) BLAST.chunks.splice(0, BLAST.chunks.length - 220);
-    crater(x, z, 1.4 * size);
+    if (!fuel) crater(x, z, 1.4 * size); else crater(x, z, 1.0);
+    // кольцо пыли, бегущее по земле от центра — видна ударная волна
+    for (let i = 0; i < 26 * size; i++) {
+      const a = i / (26 * size) * TAU + sr(-0.1, 0.1), sp = sr(9, 15) * Math.sqrt(size);
+      FX.alpha.spawn({ x: x + Math.cos(a) * 0.8, y: gy + 0.25, z: z + Math.sin(a) * 0.8, vx: Math.cos(a) * sp, vy: sr(0.2, 0.8), vz: Math.sin(a) * sp,
+        size: sr(0.9, 1.6) * size, grow: 1.4, life: sr(1.6, 2.6), col: [0.46, 0.41, 0.34], a: 0.35, fadeIn: 0.05, drag: 2.6, windK: 0.6 });
+    }
   }
   // дым: медленно поднимается и сносится ветром
   for (let i = 0; i < 14 * size; i++) {
     FX.alpha.spawn({ x: x + sr(-1, 1), y: gy + sr(0.3, 2.5), z: z + sr(-1, 1), vx: sr(-0.8, 0.8), vy: sr(0.6, 2.2), vz: sr(-0.8, 0.8),
       size: sr(1.4, 2.6) * size, grow: 1.1, life: sr(5, 9), col: water ? [0.7, 0.72, 0.74] : [0.3, 0.28, 0.26], a: 0.5, fadeIn: 0.25, windK: 1.5, drag: 0.5 });
   }
+  // столб дыма держится и сносится ветром ещё долго после вспышки
+  if (!water) for (let i = 0; i < 6 * size; i++) FX.alpha.spawn({ x: x + sr(-0.4, 0.4), y: gy + sr(1, 4) * size, z: z + sr(-0.4, 0.4), vx: sr(-0.3, 0.3), vy: sr(1.2, 2.6), vz: sr(-0.3, 0.3),
+    size: sr(1.8, 3) * size, grow: 0.8, life: sr(9, 16), col: [0.24, 0.23, 0.22], a: 0.28, fadeIn: 1.2, windK: 1.8, drag: 0.4 });
   // ударная волна
   windUniforms.uBlast.value.set(x, gy, z, 0);
   windUniforms.uBlastStr.value = 1.6 * size;
   blastBarrels(x, gy, z, size);
+  blastDestruct(x, gy, z, size, kind);
   nudgeCloth(x, gy, z, 16, 30 * size);
   // камера и звук
   const d = camera.position.distanceTo(new THREE.Vector3(x, gy, z));

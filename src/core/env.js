@@ -1,4 +1,5 @@
 import * as THREE from 'three';
+import './atmosphere.js';
 
 /* Общее окружение: рендерер, сцена, камера, пресеты качества и часы кадра.
    Пресеты меняют только бюджеты (тени, плотность, пост-эффекты), а не саму карту:
@@ -7,17 +8,17 @@ import * as THREE from 'three';
 export const PRESETS = {
   low: {
     name: 'низкое', shadow: 1024, grass: 9000, grassR: 24, trees: 0.72, treeNearR: 42,
-    bloom: false, smaa: false, pixel: 1.0, refl: 0, cloth: 10, lights: 4, tex: 0.5,
+    bloom: false, smaa: false, pixel: 1.0, refl: 0, cloth: 10, lights: 3, tex: 0.5,
     ferns: 0.55, dust: 900, shadowTrees: false
   },
   medium: {
     name: 'среднее', shadow: 2048, grass: 26000, grassR: 34, trees: 0.9, treeNearR: 62,
-    bloom: true, smaa: true, pixel: 1.25, refl: 384, cloth: 14, lights: 6, tex: 0.75,
+    bloom: true, smaa: true, pixel: 1.25, refl: 384, cloth: 14, lights: 4, tex: 0.75,
     ferns: 0.8, dust: 1800, shadowTrees: true
   },
   high: {
     name: 'высокое', shadow: 4096, grass: 60000, grassR: 44, trees: 1.0, treeNearR: 85,
-    bloom: true, smaa: true, pixel: 1.6, refl: 640, cloth: 18, lights: 8, tex: 1.0,
+    bloom: true, smaa: true, pixel: 1.5, refl: 640, cloth: 18, lights: 6, tex: 1.0,
     ferns: 1.0, dust: 3000, shadowTrees: true
   }
 };

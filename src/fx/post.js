@@ -5,6 +5,7 @@ import { UnrealBloomPass } from 'three/addons/postprocessing/UnrealBloomPass.js'
 import { ShaderPass } from 'three/addons/postprocessing/ShaderPass.js';
 import { SMAAPass } from 'three/addons/postprocessing/SMAAPass.js';
 import { OutputPass } from 'three/addons/postprocessing/OutputPass.js';
+import { Pass, FullScreenQuad } from 'three/addons/postprocessing/Pass.js';
 import { renderer, scene, camera, Q, FRAME } from '../core/env.js';
 import { lerp } from '../core/math.js';
 
@@ -34,10 +35,88 @@ const Grade = {
       gl_FragColor = c;
     }`
 };
-export let composer, bloom, grade, smaa;
+/* ---------- Лучи света сквозь кроны ----------
+   Маска: открытое небо (глубина на дальней плоскости) вокруг диска солнца.
+   Радиальное размытие к солнцу в половинном разрешении в два прохода даёт
+   «столбы» между стволами; результат добавляется к кадру с цветом солнца.
+   Тот же проход чистит NaN/Inf из HDR — одна битая точка не зальёт экран
+   через блум. */
+const RAYS_MASK = `
+  uniform sampler2D tColor, tDepth; uniform vec2 uSun; uniform float uAspect; varying vec2 vUv;
+  void main(){
+    float d = texture2D(tDepth, vUv).r;
+    vec3 c = texture2D(tColor, vUv).rgb;
+    float sky = step(0.99995, d);
+    vec2 dv = (vUv - uSun) * vec2(uAspect, 1.0);
+    float disk = exp(-dot(dv, dv) * 9.0) + exp(-dot(dv, dv) * 90.0) * 2.0;
+    float lum = dot(min(c, vec3(8.0)), vec3(0.3, 0.5, 0.2));
+    gl_FragColor = vec4(vec3(sky * disk * clamp(lum, 0.2, 2.0)), 1.0);
+  }`;
+const RAYS_BLUR = `
+  uniform sampler2D tMask; uniform vec2 uSun; uniform float uStep; varying vec2 vUv;
+  void main(){
+    vec2 dir = (uSun - vUv) * uStep;
+    vec2 uv = vUv; float w = 1.0, acc = 0.0, sum = 0.0;
+    for (int i = 0; i < 24; i++) { acc += texture2D(tMask, uv).r * w; sum += w; w *= 0.955; uv += dir; }
+    gl_FragColor = vec4(vec3(acc / sum), 1.0);
+  }`;
+const RAYS_COMP = `
+  uniform sampler2D tColor, tRays; uniform vec3 uCol; varying vec2 vUv;
+  void main(){
+    vec4 c = texture2D(tColor, vUv);
+    // санитайзер: NaN и бесконечности из HDR — в ноль/предел
+    if (!(c.r == c.r) || !(c.g == c.g) || !(c.b == c.b)) c = vec4(0.0, 0.0, 0.0, 1.0);
+    c.rgb = min(c.rgb, vec3(60.0));
+    float r = texture2D(tRays, vUv).r;
+    c.rgb += uCol * r;
+    gl_FragColor = c;
+  }`;
+const VS = `varying vec2 vUv; void main(){ vUv = uv; gl_Position = vec4(position.xy, 0.0, 1.0); }`;
+class RaysPass extends Pass {
+  constructor() {
+    super();
+    const mk = (fs, u) => new THREE.ShaderMaterial({ uniforms: u, vertexShader: VS, fragmentShader: fs, depthTest: false, depthWrite: false });
+    this.mask = mk(RAYS_MASK, { tColor: { value: null }, tDepth: { value: null }, uSun: { value: new THREE.Vector2() }, uAspect: { value: 1 } });
+    this.blur = mk(RAYS_BLUR, { tMask: { value: null }, uSun: { value: new THREE.Vector2() }, uStep: { value: 0.02 } });
+    this.comp = mk(RAYS_COMP, { tColor: { value: null }, tRays: { value: null }, uCol: { value: new THREE.Color() } });
+    this.quad = new FullScreenQuad(this.mask);
+    const o = { type: THREE.HalfFloatType, depthBuffer: false };
+    this.a = new THREE.WebGLRenderTarget(4, 4, o); this.b = new THREE.WebGLRenderTarget(4, 4, o);
+    this.strength = 0; this.sun = new THREE.Vector2();
+  }
+  setSize(w, h) { this.a.setSize(Math.max(1, w >> 1), Math.max(1, h >> 1)); this.b.setSize(Math.max(1, w >> 1), Math.max(1, h >> 1)); this.aspect = w / h; }
+  render(r, writeBuffer, readBuffer) {
+    const on = this.strength > 0.002 && readBuffer.depthTexture;
+    if (on) {
+      this.mask.uniforms.tColor.value = readBuffer.texture; this.mask.uniforms.tDepth.value = readBuffer.depthTexture;
+      this.mask.uniforms.uSun.value.copy(this.sun); this.mask.uniforms.uAspect.value = this.aspect || 1;
+      this.quad.material = this.mask; r.setRenderTarget(this.a); this.quad.render(r);
+      this.blur.uniforms.uSun.value.copy(this.sun);
+      this.blur.uniforms.tMask.value = this.a.texture; this.blur.uniforms.uStep.value = 0.028;
+      this.quad.material = this.blur; r.setRenderTarget(this.b); this.quad.render(r);
+      this.blur.uniforms.tMask.value = this.b.texture; this.blur.uniforms.uStep.value = 0.009;
+      r.setRenderTarget(this.a); this.quad.render(r);
+    }
+    this.comp.uniforms.tColor.value = readBuffer.texture;
+    this.comp.uniforms.tRays.value = this.a.texture;
+    this.comp.uniforms.uCol.value.copy(this.color || new THREE.Color()).multiplyScalar(on ? this.strength : 0);
+    this.quad.material = this.comp;
+    r.setRenderTarget(this.renderToScreen ? null : writeBuffer);
+    this.quad.render(r);
+  }
+}
+export let composer, bloom, grade, smaa, rays;
 export function buildPost() {
-  composer = new EffectComposer(renderer);
+  // цель с текстурой глубины: по ней лучи отличают небо от крон
+  const size = renderer.getDrawingBufferSize(new THREE.Vector2());
+  const rt = new THREE.WebGLRenderTarget(size.x, size.y, { type: THREE.HalfFloatType });
+  rt.depthTexture = new THREE.DepthTexture(size.x, size.y);
+  rt.depthTexture.type = THREE.UnsignedIntType;
+  composer = new EffectComposer(renderer, rt);
+  composer.setPixelRatio(renderer.getPixelRatio());
   composer.addPass(new RenderPass(scene, camera));
+  rays = new RaysPass();
+  composer.addPass(rays);
   bloom = new UnrealBloomPass(new THREE.Vector2(innerWidth, innerHeight), 0.3, 0.6, 0.88);
   bloom.enabled = Q.bloom;
   composer.addPass(bloom);
@@ -47,8 +126,18 @@ export function buildPost() {
   smaa = new SMAAPass(innerWidth * renderer.getPixelRatio(), innerHeight * renderer.getPixelRatio());
   smaa.enabled = Q.smaa;
   composer.addPass(smaa);
+  composer.setSize(innerWidth, innerHeight);
 }
+const _sp = new THREE.Vector3(), _cf = new THREE.Vector3();
 export function updatePost(sky, hit) {
+  // экранная позиция солнца; лучи гаснут, когда солнце за спиной или у горизонта
+  _sp.copy(sky.sunDir).multiplyScalar(1000).add(camera.position).project(camera);
+  camera.getWorldDirection(_cf);
+  const facing = Math.max(0, _cf.dot(sky.sunDir));
+  const edge = Math.max(0, 1 - Math.max(Math.abs(_sp.x), Math.abs(_sp.y)) / 1.6);
+  rays.sun.set(_sp.x * 0.5 + 0.5, _sp.y * 0.5 + 0.5);
+  rays.strength = Q.bloom ? Math.pow(facing, 1.5) * edge * Math.min(1, sky.sunDir.y * 6 + 0.2) * (1 - sky.night) * 0.55 : 0;
+  rays.color = sky.sunColor;
   grade.uniforms.uNight.value = sky.night;
   grade.uniforms.uSat.value = lerp(1.06, 0.88, sky.night);
   grade.uniforms.uVig.value = lerp(0.22, 0.42, sky.night);

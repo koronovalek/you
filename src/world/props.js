@@ -2,7 +2,7 @@ import * as THREE from 'three';
 import { scene, FRAME } from '../core/env.js';
 import { rng, TAU, clamp } from '../core/math.js';
 import { MAP, lakeContour, isFree, keep, edgeDist, terrainH, terrainNormal, SPAWNS, CLUSTERS } from './layout.js';
-import { hFast } from './heightcache.js';
+import { hFast, groundMin } from './heightcache.js';
 import { M } from '../gen/materials.js';
 import { place, box, cyl } from './builders.js';
 import { addBox, addCircle } from '../core/colliders.js';
@@ -91,6 +91,7 @@ function writeBarrel(b) {
 /** Импульс от взрыва: бочки ближе 9 м подбрасывает и закручивает. */
 export function blastBarrels(x, y, z, power) {
   for (const b of BARRELS) {
+    if (b.dead) continue;
     const dx = b.pos.x - x, dy = b.pos.y - y, dz = b.pos.z - z, d = Math.hypot(dx, dy, dz);
     if (d > 9) continue;
     const f = power * (1 - d / 9) * (1 - d / 9) * 14;
@@ -101,7 +102,7 @@ export function blastBarrels(x, y, z, power) {
 }
 export function updateBarrels(dt) {
   for (const b of BARRELS) {
-    if (b.rest > 1.5) continue;
+    if (b.rest > 1.5 || b.dead) continue;
     b.vel.y -= 9.8 * dt;
     b.pos.addScaledVector(b.vel, dt);
     const wl = b.w.length();
@@ -131,10 +132,15 @@ function fallenLog(x, z, rot, L, r, R) {
   const g = new THREE.CylinderGeometry(r * 0.75, r, L, 9, 1);
   const uv = g.attributes.uv; for (let i = 0; i < uv.count; i++) uv.setXY(i, uv.getX(i) * 2, uv.getY(i) * L / 1.2);
   place(M.barkPine, g, x, y + r * 0.8, z, [Math.PI / 2 - pitch, rot, 0]);
-  // обломанные сучья
+  // обломанные сучья: растут из ствола наружу, основание утоплено в кору
   for (let i = 0; i < 4; i++) {
     const t = R.range(-0.4, 0.45) * L, bx = x + s * t, bz = z + a * t;
-    cyl(M.deadwood, bx, y + r * 1.4 + 0.2, bz, 0.04, 0.02, R.range(0.5, 1.1), { seg: 4, rot: [R.range(-0.8, 0.8), R() * TAU, R.range(-0.8, 0.8)] });
+    const len = R.range(0.5, 1.1), ang = R.range(-1.1, 1.1);
+    // направление сука: вверх-вбок от оси бревна
+    const dx = Math.cos(rot) * Math.sin(ang), dy = Math.cos(ang), dz = -Math.sin(rot) * Math.sin(ang);
+    const cyv = y + r * 0.8 + pitch * t;
+    cyl(M.deadwood, bx + dx * (r * 0.7 + len / 2), cyv + dy * (r * 0.7 + len / 2), bz + dz * (r * 0.7 + len / 2), 0.04, 0.02, len,
+      { seg: 4, rot: [0, rot, -ang] });
   }
   // корневой выворот у части стволов
   if (R() < 0.5) {
@@ -158,7 +164,7 @@ function fallenLog(x, z, rot, L, r, R) {
   addBox(x, y + r * 0.8, z, r * 1.8, r * 1.8, L, rot);
 }
 function stump(x, z, R) {
-  const y = hFast(x, z), r = R.range(0.2, 0.42), h = R.range(0.3, 0.8);
+  const r = R.range(0.2, 0.42), h = R.range(0.3, 0.8), y = groundMin(x, z, r * 1.25);
   cyl(M.barkSpruce, x, y + h / 2 - 0.05, z, r * 1.25, r, h, { seg: 8 });
   place(M.logEnd, new THREE.CircleGeometry(r * 0.95, 9), x, y + h - 0.04, z, [-Math.PI / 2 + R.range(-0.2, 0.2), 0, R.range(-0.2, 0.2)]);
   addCircle(x, z, r * 1.2, y, y + h);
@@ -176,8 +182,8 @@ function boulder(x, z, s, R) {
   }
   g.setAttribute('color', new THREE.BufferAttribute(col, 3));
   g.computeVertexNormals();
-  const y = hFast(x, z);
-  place(M.stone, g, x, y + s * 0.18, z, R() * TAU, [s * R.range(1, 1.5), s, s * R.range(0.8, 1.2)]);
+  const y = groundMin(x, z, s * 1.2);
+  place(M.stone, g, x, y + s * 0.12, z, R() * TAU, [s * R.range(1, 1.5), s, s * R.range(0.8, 1.2)]);
   addCircle(x, z, s * 1.05, y, y + s * 0.8);
 }
 

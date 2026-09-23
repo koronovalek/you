@@ -92,3 +92,37 @@ export function ceilingAt(x, z, r, y0, y1) {
   });
   return low;
 }
+
+/* ---------- Мягкие препятствия: подрост, кусты, камыш ----------
+   Не держат, но тормозят и слегка расталкивают: сквозь ельник продираются,
+   а не проходят как сквозь воздух. Отдельная сетка — жёсткие проверки не тяжелеют. */
+const SOFT = new Map();
+export const SOFTS = [];
+const SLOW = { sapling: 0.5, bush: 0.42, reed: 0.62, juniper: 0.35 };
+export function addSoft(x, z, r, y0, y1, kind = 'bush') {
+  const c = { x, z, r, y0, y1, kind, soft: true, slow: SLOW[kind] ?? 0.55 };
+  const e = r + 0.4;
+  for (let ix = Math.floor((x - e) / CELL); ix <= Math.floor((x + e) / CELL); ix++)
+    for (let iz = Math.floor((z - e) / CELL); iz <= Math.floor((z + e) / CELL); iz++) {
+      const k = key(ix, iz);
+      if (!SOFT.has(k)) SOFT.set(k, []);
+      SOFT.get(k).push(c);
+    }
+  SOFTS.push(c);
+  return c;
+}
+/** Замедление в точке (1 — свободно) и лёгкое выталкивание к краю куста. */
+export function softAt(p, r, y, dt) {
+  let slow = 1, kind = null;
+  const L = SOFT.get(key(Math.floor(p.x / CELL), Math.floor(p.z / CELL)));
+  if (!L) return { slow, kind };
+  for (const c of L) {
+    if (c.dead || y > c.y1 || y + 1.6 < c.y0) continue;
+    const dx = p.x - c.x, dz = p.z - c.z, d = Math.hypot(dx, dz), R = r + c.r;
+    if (d >= R) continue;
+    const k = 1 - d / R;
+    if (c.slow < slow + 0.2 * k) { slow = Math.min(slow, 1 - (1 - c.slow) * Math.min(1, k * 1.6)); kind = c.kind; }
+    if (d > 1e-4) { const push = (R - d) * Math.min(1, dt * 2.5); p.x += dx / d * push; p.z += dz / d * push; }
+  }
+  return { slow, kind };
+}
