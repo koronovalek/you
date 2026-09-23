@@ -1,12 +1,12 @@
 import * as THREE from 'three';
 import { camera, FRAME } from '../core/env.js';
 import { clamp, lerp, smoothstep } from '../core/math.js';
-import { MAP, SPAWNS, terrainH, edgeDist, inMinefield, lakeRho, ISLAND, CLUSTERS, lakeContour } from '../world/layout.js';
+import { MAP, SPAWNS, terrainH, edgeDist, inMinefield, lakeRho, ISLAND, CLUSTERS, lakeContour, pathInfluence } from '../world/layout.js';
 import { hFast } from '../world/heightcache.js';
-import { pushOut, supportTop, ceilingAt } from '../core/colliders.js';
+import { pushOut, supportTop, ceilingAt, softAt } from '../core/colliders.js';
 import { mineNear } from '../world/military.js';
 import { explode, BLAST } from '../fx/explosions.js';
-import { click } from '../fx/audio.js';
+import { click, sfx } from '../fx/audio.js';
 import { windUniforms } from '../world/wind.js';
 import { addRipple } from '../world/lake.js';
 import { FX } from '../fx/particles.js';
@@ -28,7 +28,7 @@ export const PL = {
   pos: new THREE.Vector3(), vel: new THREE.Vector3(), yaw: 0, pitch: -0.2, roll: 0,
   speed: 12, onGround: false, crouch: 0, eye: 1.68, bob: 0, bobAmp: 0, step: 0,
   dead: 0, deathMsg: '', light: false, swim: false, agl: 0, jumpLock: false,
-  cine: null, lastDrop: -9
+  cine: null, lastDrop: -9, brush: 0, stepN: 0, soft: null
 };
 export const keys = {};
 const SENS = 0.0021;
@@ -170,8 +170,15 @@ function updateDrone(dt, ix, iz, boost) {
   const k = tmp.lengthSq() > PL.vel.lengthSq() ? 2.6 : 3.8;
   PL.vel.lerp(tmp, Math.min(1, dt * k));
   PL.pos.addScaledVector(PL.vel, dt);
-  // земля, вода и граница мира
-  const g = Math.max(hFast(PL.pos.x, PL.pos.z), lakeRho(PL.pos.x, PL.pos.z) < 1 ? MAP.WATER_Y : -1e9);
+  // стволы, стены и машины твёрдые и для дрона: скользит вдоль, а не проходит насквозь
+  const px = PL.pos.x, pz = PL.pos.z;
+  if (pushOut(PL.pos, 0.38, PL.pos.y - 0.25, PL.pos.y + 0.25)) {
+    const nx = PL.pos.x - px, nz = PL.pos.z - pz, l = Math.hypot(nx, nz);
+    if (l > 1e-5) { const vn = (PL.vel.x * nx + PL.vel.z * nz) / l; if (vn < 0) { PL.vel.x -= nx / l * vn * 1.2; PL.vel.z -= nz / l * vn * 1.2; } }
+  }
+  // земля, вода, крыши и настилы — ниже 0.4 м над опорой не опуститься
+  const roof = supportTop(PL.pos.x, PL.pos.z, 0.3, PL.pos.y, 0.4);
+  const g = Math.max(hFast(PL.pos.x, PL.pos.z), lakeRho(PL.pos.x, PL.pos.z) < 1 ? MAP.WATER_Y : -1e9, roof);
   if (PL.pos.y < g + 0.4) { PL.pos.y = g + 0.4; if (PL.vel.y < 0) PL.vel.y = 0; }
   PL.pos.y = Math.min(PL.pos.y, 160);
   const lim = MAP.FENCE + 40, e = edgeDist(PL.pos.x, PL.pos.z);
@@ -194,7 +201,10 @@ function updateWalk(dt, ix, iz, boost) {
   const wantCrouch = keys.KeyC || keys.ControlLeft;
   PL.crouch = lerp(PL.crouch, wantCrouch && !PL.swim ? 1 : 0, Math.min(1, dt * 10));
   const wade = depth > 0.35 && !PL.swim ? 0.55 : 1;
-  const sp = (PL.swim ? 1.4 : 3.6 * (boost > 1 ? 1.75 : boost < 1 ? 0.45 : 1)) * lerp(1, 0.45, PL.crouch) * wade;
+  // кусты, подрост и камыш: продираемся медленнее, они расступаются
+  const soft = softAt(PL.pos, 0.3, PL.pos.y, dt);
+  PL.soft = soft.kind;
+  const sp = (PL.swim ? 1.4 : 3.6 * (boost > 1 ? 1.75 : boost < 1 ? 0.45 : 1)) * lerp(1, 0.45, PL.crouch) * wade * soft.slow;
   tmp.set(0, 0, 0).addScaledVector(fwd, iz * sp).addScaledVector(right, ix * sp);
   const acc = PL.onGround || PL.swim ? 12 : 2.5;
   PL.vel.x += (tmp.x - PL.vel.x) * Math.min(1, acc * dt);
@@ -231,6 +241,20 @@ function updateWalk(dt, ix, iz, boost) {
   const hs = Math.hypot(PL.vel.x, PL.vel.z);
   PL.bobAmp = lerp(PL.bobAmp, (PL.onGround || PL.swim) ? clamp(hs / 4.5, 0, 1) : 0, Math.min(1, dt * 8));
   PL.step += hs * dt * 2.1;
+  PL.brush = lerp(PL.brush, soft.kind ? clamp(hs / 2.5, 0, 1) : 0, Math.min(1, dt * 10));
+  // шаги: поверхность под ногой определяет звук; вброд — кольца по воде
+  if (Math.floor(PL.step) !== PL.stepN) {
+    PL.stepN = Math.floor(PL.step);
+    if ((PL.onGround || PL.swim) && hs > 0.6) {
+      const g0 = terrainH(PL.pos.x, PL.pos.z);
+      const surf = PL.pos.y > Math.max(g0, water) + 0.08 ? 'wood' : depth > 0.04 ? 'water' : pathInfluence(PL.pos.x, PL.pos.z) > 0.3 ? 'dirt' : 'grass';
+      sfx('step', PL.pos.x, PL.pos.y + 0.1, PL.pos.z, clamp(hs / 4, 0.3, 1) * lerp(1, 0.5, PL.crouch), surf);
+      if (surf === 'water') {
+        addRipple(PL.pos.x, PL.pos.z, PL.swim ? 0.5 : 0.3);
+        FX.alpha.spawn({ x: PL.pos.x + sr(-0.3, 0.3), y: MAP.WATER_Y + 0.05, z: PL.pos.z + sr(-0.3, 0.3), vx: sr(-0.5, 0.5), vy: sr(0.8, 1.6), vz: sr(-0.5, 0.5), size: 0.25, grow: 0.8, life: 0.7, col: [0.8, 0.83, 0.86], a: 0.35, grav: 5 });
+      }
+    }
+  }
   PL.bob = Math.sin(PL.step * Math.PI) * 0.03 * PL.bobAmp;
   PL.roll = lerp(PL.roll, 0, Math.min(1, dt * 6));
   PL.agl = 1.7;

@@ -13,6 +13,7 @@ export const windUniforms = {
   uTime: { value: 0 },
   uWind: { value: new THREE.Vector2(0.8, 0.6) },
   uWindAmp: { value: 0.6 },
+  uGust: { value: 0.5 },
   uPlayer: { value: new THREE.Vector3(0, -999, 0) },
   uBlast: { value: new THREE.Vector4(0, -999, 0, 99) },
   uBlastStr: { value: 0 }
@@ -27,26 +28,37 @@ export function updateWind(t) {
   windUniforms.uTime.value = t;
   windUniforms.uWind.value.copy(WIND.dir);
   windUniforms.uWindAmp.value = WIND.strength;
+  windUniforms.uGust.value = WIND.gust;
 }
 
-const WIND_GLSL = /* glsl */`
+export const WIND_GLSL = /* glsl */`
 uniform float uTime;
 uniform vec2 uWind;
 uniform float uWindAmp;
+uniform float uGust;
 uniform vec3 uPlayer;
 uniform vec4 uBlast;
 uniform float uBlastStr;
+// Порыв бежит по лесу волной вдоль ветра: соседние деревья качаются вразнобой,
+// но общий «накат» виден издалека — как по полю ржи.
+float gustWave(vec2 p) {
+  float along = dot(p, uWind), across = dot(p, vec2(-uWind.y, uWind.x));
+  float w = sin(along * 0.045 - uTime * 1.35 + sin(across * 0.031 + uTime * 0.2) * 2.2);
+  w += 0.5 * sin(along * 0.11 - uTime * 2.3 + across * 0.07);
+  return 0.55 + 0.45 * clamp(w * 0.66 + 0.2, -1.0, 1.0) * (0.6 + uGust * 0.5);
+}
 `;
 
 /** Врезка ветра в стандартный материал. Смещение считается в мировых
     координатах и переводится обратно в локальные: инстансы повёрнуты и
     масштабированы, а изгиб должен идти по ветру, а не по оси модели.
     amp — амплитуда (м) у вершины высотой refH; stiff — показатель изгиба;
-    flutter — дрожь листвы; trample — приминание игроком. */
+    flutter — дрожь листвы; branch — покачивание лап вверх-вниз по радиусу
+    от ствола; trample — приминание игроком. */
 export function injectWind(mat, o = {}) {
   const amp = (o.amp ?? 0.3).toFixed(4), stiff = (o.stiff ?? 2.0).toFixed(3);
   const refH = (o.refH ?? 10).toFixed(3), flutter = (o.flutter ?? 0.02).toFixed(4);
-  const blast = (o.blast ?? 1).toFixed(3);
+  const blast = (o.blast ?? 1).toFixed(3), branch = (o.branch ?? 0).toFixed(4);
   const trample = !!o.trample;
   const prev = mat.onBeforeCompile;
   mat.onBeforeCompile = (sh, r) => {
@@ -60,16 +72,27 @@ export function injectWind(mat, o = {}) {
         #else
           mat4 mw = modelMatrix;
         #endif
-        vec3 root = (mw * vec4(0.0, 0.0, 0.0, 1.0)).xyz;
+        mat3 m3 = mat3(mw);
+        vec3 root = mw[3].xyz;
         vec3 wp = (mw * vec4(transformed, 1.0)).xyz;
         float hh = max(wp.y - root.y, 0.0);
         float k = pow(hh / ${refH}, ${stiff});
         float ph = dot(root.xz, vec2(0.31, 0.27));
+        float gw = gustWave(root.xz);
         float sway = sin(uTime * 1.05 + ph) * 0.55 + sin(uTime * 2.2 + ph * 1.7) * 0.25 + sin(uTime * 0.43 + ph * 0.5) * 0.35;
-        vec3 disp = vec3(uWind.x, 0.0, uWind.y) * (0.55 + sway) * uWindAmp * ${amp} * k;
+        vec3 disp = vec3(uWind.x, 0.0, uWind.y) * (0.35 + sway * 0.8 + gw * 0.75) * uWindAmp * ${amp} * k;
+        // поперечное «рысканье» верхушки — крона описывает эллипс, а не маятник
+        disp.xz += vec2(-uWind.y, uWind.x) * sin(uTime * 0.83 + ph * 2.1) * 0.22 * uWindAmp * ${amp} * k;
         float fl = ${flutter} * uWindAmp * min(k, 1.5);
+        fl *= 0.6 + gw * 0.8;
         disp += vec3(sin(uTime * 6.1 + wp.x * 2.3 + wp.y * 1.3), sin(uTime * 5.3 + wp.z * 2.1) * 0.5,
                      cos(uTime * 6.7 + wp.z * 2.2 + wp.y * 1.1)) * fl;
+        ${o.branch ? `
+        // лапы пружинят: чем дальше от ствола, тем сильнее кивок
+        float rad = length(wp.xz - root.xz);
+        float bph = uTime * (1.7 + fract(ph) * 0.6) + ph * 3.0 + hh * 0.35;
+        disp.y += sin(bph) * rad * rad * ${branch} * uWindAmp * (0.5 + gw);
+        disp.xz += vec2(uWind.x, uWind.y) * rad * ${branch} * 0.6 * sin(bph * 0.7 + 1.3) * uWindAmp;` : ''}
         // ударная волна: фронт ~70 м/с, затухающее колебание после прохода
         vec2 bd = wp.xz - uBlast.xz;
         float bdist = length(bd);
@@ -87,11 +110,13 @@ export function injectWind(mat, o = {}) {
           disp.xz += (pdist > 0.001 ? pd / pdist : vec2(1.0, 0.0)) * press * hh * 0.7;
           disp.y -= press * hh * 0.55;
         }` : ''}
-        transformed += inverse(mat3(mw)) * disp;
+        // инстансы — поворот × масштаб без сдвига: M⁻¹v = S⁻² Mᵀv, без inverse() на каждую вершину
+        vec3 sc2 = vec3(dot(m3[0], m3[0]), dot(m3[1], m3[1]), dot(m3[2], m3[2]));
+        transformed += (transpose(m3) * disp) / sc2;
       }
     `);
   };
   const key = mat.customProgramCacheKey();
-  mat.customProgramCacheKey = () => key + '|wind' + amp + stiff + refH + flutter + trample + blast;
+  mat.customProgramCacheKey = () => key + '|wind' + amp + stiff + refH + flutter + trample + blast + branch;
   return mat;
 }

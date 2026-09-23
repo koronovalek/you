@@ -19,6 +19,8 @@ import { addCircle } from '../core/colliders.js';
    с камерой — пул фиксированного размера, шейдеры не пересобираются.
 ============================================================================ */
 export const LAMPS = [];
+/** Временные источники (горящие обломки): в пул точечного света наравне с окнами. */
+export const DYN_LIGHTS = [];
 const KIND = {
   post: { power: 45, range: 24, color: 0xffc27e, glow: 1.6, pool: 8.5, weight: 1.0, cone: true },
   flood: { power: 160, range: 44, color: 0xf2f0ff, glow: 2.2, pool: 13, weight: 1.6, cone: true },
@@ -278,7 +280,7 @@ export function finishLamps() {
     scene.add(sp, sp.target);
     SPOTS.push(sp);
   }
-  for (let i = 0; i < 3; i++) {
+  for (let i = 0; i < 2; i++) {
     const pl = new THREE.PointLight(0xffa860, 0, 10, 1.8);
     pl.position.set(0, -500, 0); scene.add(pl); POINTS.push(pl);
   }
@@ -328,7 +330,8 @@ export function updateLamps(lampOn) {
     const d = Math.sqrt(L.rank) * (L.kind === 'flood' ? 1.6 : 1);
     S.intensity = L.power * L.level * clamp(1.3 - d / 120, 0, 1);
   });
-  const ptC = LAMPS.filter(L => L.rank < 1e12 && (L.kind === 'window' || L.kind === 'fire' || L.kind === 'bulb')).sort((a, b) => a.rank - b.rank);
+  for (const L of DYN_LIGHTS) L.rank = L.level > 0.01 ? L.pos.distanceToSquared(cp) / 0.36 : 1e12;
+  const ptC = LAMPS.filter(L => L.rank < 1e12 && (L.kind === 'window' || L.kind === 'fire' || L.kind === 'bulb')).concat(DYN_LIGHTS.filter(L => L.rank < 1e12)).sort((a, b) => a.rank - b.rank);
   POINTS.forEach((P, i) => {
     const L = ptC[i];
     if (!L || L.rank > 90 * 90) { P.intensity = 0; return; }

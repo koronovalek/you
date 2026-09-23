@@ -6,13 +6,58 @@ import { hFast, grassDensity } from './heightcache.js';
 import { forestDensity, treeNear, saplingGeo } from './forest.js';
 import { M } from '../gen/materials.js';
 import { injectWind } from './wind.js';
+import { addSoft } from '../core/colliders.js';
 
 /* ============================================================================
    ПОДЛЕСОК: трава вокруг камеры, папоротник, черничник, подрост ёлок.
    Трава пересобирается по мере движения; позиции берутся из хеша ячейки,
    поэтому при возврате на место травинки те же — ничего не «прыгает».
 ============================================================================ */
-export const GRASS = { im: null, center: new THREE.Vector2(1e9, 1e9), count: 0 };
+export { GRASS, buildGrass, refreshGrass, finishGrass } from './grass.js';
+
+const UG_TILE = 40;
+const UNDER = [];      // плитки подлеска: {im, items, far, low}
+const _cv = new THREE.Vector3();
+/** Видимость плиток по дистанции; с высоты дрона мелочь не рисуется. */
+export function updateUndergrowth() {
+  const cp = camera.position;
+  const agl = cp.y - hFast(cp.x, cp.z);
+  for (const t of UNDER) {
+    const d = Math.hypot(t.x - cp.x, t.z - cp.z) - UG_TILE * 0.7;
+    t.im.visible = d < t.far && !(t.low && agl > 70);
+  }
+}
+/** Взрыв: подлесок в радиусе r срезает (инстанс гасится), чуть дальше — приминает.
+    Возвращает срезанные точки: из них летят листья и ветки. */
+export function shredUndergrowth(x, z, r) {
+  const out = [];
+  for (const t of UNDER) {
+    if (Math.hypot(t.x - x, t.z - z) > r + UG_TILE) continue;
+    let dirty = false;
+    for (const it of t.items) {
+      if (it.gone) continue;
+      const d = Math.hypot(it.x - x, it.z - z);
+      if (d > r * 1.5) continue;
+      if (d < r) {
+        it.gone = true;
+        _m.makeScale(0, 0, 0); t.im.setMatrixAt(it.i, _m);
+        out.push({ x: it.x, z: it.z, s: it.s, kind: t.kind });
+        if (it.soft) it.soft.dead = true;
+      } else {
+        // приминание: ниже и с наклоном от центра взрыва
+        it.m.decompose(_p, _q, _s);
+        _s.y *= 0.55; _cv.set(it.z - z, 0, x - it.x).normalize();
+        _q.premultiply(new THREE.Quaternion().setFromAxisAngle(_cv, 0.5));
+        t.im.setMatrixAt(it.i, _m.compose(_p, _q, _s));
+      }
+      dirty = true;
+    }
+    if (dirty) t.im.instanceMatrix.needsUpdate = true;
+  }
+  return out;
+}
+
+const _m = new THREE.Matrix4(), _p = new THREE.Vector3(), _q = new THREE.Quaternion(), _s = new THREE.Vector3(), _c = new THREE.Color(), _up = new THREE.Vector3(0, 1, 0);
 
 function clumpGeo(planes, w, h, segs = 2) {
   const parts = [];
@@ -20,7 +65,6 @@ function clumpGeo(planes, w, h, segs = 2) {
     const g = new THREE.PlaneGeometry(w, h, 1, segs);
     g.translate(0, h / 2, 0);
     g.rotateY(p / planes * Math.PI + 0.2);
-    // нормали вверх: пучок освещается как объём, а не как плоскость
     const n = g.attributes.normal;
     for (let i = 0; i < n.count; i++) n.setXYZ(i, n.getX(i) * 0.3, 0.9, n.getZ(i) * 0.3);
     parts.push(g);
@@ -40,103 +84,61 @@ function clumpGeo(planes, w, h, segs = 2) {
   return merged;
 }
 
-export function buildGrass() {
-  injectWind(M.grass, { amp: 0.16, stiff: 1.6, refH: 0.8, flutter: 0.04, trample: true, blast: 1.4 });
-  const im = new THREE.InstancedMesh(clumpGeo(3, 0.62, 0.62), M.grass, Q.grass);
-  im.count = 0; im.frustumCulled = false; im.receiveShadow = true; im.castShadow = false;
-  im.instanceMatrix.setUsage(THREE.DynamicDrawUsage);
-  im.name = 'grass';
-  scene.add(im);
-  NO_REFLECT.push(im);
-  GRASS.im = im;
-  refreshGrass(true);
-}
-const _m = new THREE.Matrix4(), _q = new THREE.Quaternion(), _p = new THREE.Vector3(), _s = new THREE.Vector3(), _c = new THREE.Color();
-const _up = new THREE.Vector3(0, 1, 0);
-export function refreshGrass(force) {
-  const im = GRASS.im;
-  if (!im) return;
-  const cx = camera.position.x, cz = camera.position.z;
-  const agl = camera.position.y - hFast(cx, cz);
-  // с высоты дрона трава не видна — не тратим на неё кадр
-  if (agl > 55) { if (im.count) { im.count = 0; } GRASS.center.set(1e9, 1e9); return; }
-  const R = Q.grassR;
-  if (!force && GRASS.center.distanceTo(new THREE.Vector2(cx, cz)) < R * 0.22) return;
-  GRASS.center.set(cx, cz);
-  const step = Math.sqrt(Math.PI * R * R / Q.grass) * 0.92;
-  let n = 0;
-  const i0 = Math.floor((cx - R) / step), i1 = Math.floor((cx + R) / step);
-  const j0 = Math.floor((cz - R) / step), j1 = Math.floor((cz + R) / step);
-  for (let i = i0; i <= i1 && n < Q.grass; i++) for (let j = j0; j <= j1 && n < Q.grass; j++) {
-    const h1 = hash2(i, j), h2 = hash2(j + 77, i - 31), h3 = hash2(i * 3 + 5, j * 7 - 2);
-    const x = (i + h1) * step, z = (j + h2) * step;
-    const dx = x - cx, dz = z - cz, d2 = dx * dx + dz * dz;
-    if (d2 > R * R) continue;
-    // плотность падает к краю радиуса: граница не видна
-    const fade = 1 - d2 / (R * R);
-    const dens = grassDensity(x, z);
-    if (h3 > dens * (0.35 + fade * 0.75)) continue;
-    const y = hFast(x, z);
-    const e = edgeDist(x, z);
-    const tall = e > MAP.PLAY - 2 && e < MAP.FENCE ? 1.6 : lakeRho(x, z) < 1.5 ? 1.35 : 1;
-    const sc = lerp(0.55, 1.25, hash2(i + 9, j + 13)) * tall;
-    _p.set(x, y - 0.03, z);
-    _q.setFromAxisAngle(_up, h1 * TAU);
-    _s.set(sc, sc * lerp(0.7, 1.2, h2), sc);
-    _m.compose(_p, _q, _s);
-    im.setMatrixAt(n, _m);
-    // сухая трава на минной полосе и солнечных полянах, сочная у воды
-    const dry = tall > 1.5 ? 0.55 : (1 - forestDensity(x, z)) * 0.25;
-    const v = lerp(0.8, 1.15, h3);
-    _c.setRGB(v * lerp(0.85, 1.25, dry), v * lerp(0.95, 1.0, dry), v * lerp(0.8, 0.6, dry));
-    im.setColorAt(n, _c);
-    n++;
-  }
-  im.count = n;
-  GRASS.count = n;
-  im.instanceMatrix.needsUpdate = true;
-  if (im.instanceColor) im.instanceColor.needsUpdate = true;
-}
-
 /** Статичный подлесок по всей игровой зоне. */
 export function buildUndergrowth() {
   const R = rng(4242);
   injectWind(M.fern, { amp: 0.12, stiff: 1.5, refH: 0.9, flutter: 0.05, trample: true, blast: 1.2 });
   injectWind(M.shrub, { amp: 0.05, stiff: 1.5, refH: 0.5, flutter: 0.03, trample: true, blast: 1.0 });
-  const place = (count, mat, geo, test, scale, tint) => {
+  const place = (count, mat, geo, test, scale, tint, o = {}) => {
     const pts = [];
     for (let k = 0; k < count * 6 && pts.length < count; k++) {
       const x = R.range(-MAP.FENCE, MAP.FENCE), z = R.range(-MAP.FENCE, MAP.FENCE);
       if (!test(x, z)) continue;
       pts.push([x, z]);
     }
-    const im = new THREE.InstancedMesh(geo, mat, pts.length);
-    pts.forEach(([x, z], i) => {
-      const s = R.range(scale[0], scale[1]);
-      _p.set(x, hFast(x, z) - 0.04, z); _q.setFromAxisAngle(_up, R.range(0, TAU)); _s.set(s, s * R.range(0.8, 1.15), s);
-      _m.compose(_p, _q, _s); im.setMatrixAt(i, _m);
-      const v = R.range(0.75, 1.15); _c.setRGB(v * tint[0], v * tint[1], v * tint[2]); im.setColorAt(i, _c);
-    });
-    im.receiveShadow = true; im.castShadow = false; im.frustumCulled = false;
-    scene.add(im); NO_REFLECT.push(im);
-    return im;
+    // плитки 40 м: отсечение по пирамиде и дистанции, адресное разрушение
+    const tiles = new Map();
+    for (const p of pts) {
+      const k = Math.floor(p[0] / UG_TILE) * 1024 + Math.floor(p[1] / UG_TILE);
+      if (!tiles.has(k)) tiles.set(k, []);
+      tiles.get(k).push(p);
+    }
+    for (const list of tiles.values()) {
+      const im = new THREE.InstancedMesh(geo, mat, list.length);
+      const tile = { im, items: [], far: o.far ?? 95, low: !!o.low, x: 0, z: 0, kind: o.kind };
+      list.forEach(([x, z], i) => {
+        const s = R.range(scale[0], scale[1]);
+        const y = hFast(x, z) - 0.04 - (o.sink ?? 0) * s;
+        _p.set(x, y, z); _q.setFromAxisAngle(_up, R.range(0, TAU)); _s.set(s, s * R.range(0.8, 1.15), s);
+        _m.compose(_p, _q, _s); im.setMatrixAt(i, _m);
+        const v = R.range(0.75, 1.15); _c.setRGB(v * tint[0], v * tint[1], v * tint[2]); im.setColorAt(i, _c);
+        const it = { x, z, i, s, m: _m.clone() };
+        tile.items.push(it);
+        tile.x += x / list.length; tile.z += z / list.length;
+        if (o.soft) it.soft = addSoft(x, z, s * o.soft, y, y + s * (o.softH ?? 1), o.kind);
+      });
+      im.receiveShadow = true; im.castShadow = !!o.cast; im.frustumCulled = true;
+      im.computeBoundingSphere();
+      scene.add(im); NO_REFLECT.push(im);
+      UNDER.push(tile);
+    }
   };
   // папоротник — в тени и сырости
   place(Math.round(9000 * Q.ferns), M.fern, fernGeo(), (x, z) => {
     const d = forestDensity(x, z);
     return R() < d * 0.9 && isFree(x, z, 0.4, { pathPad: 0.2, trenchPad: 0.8 }) && !treeNear(x, z, 0.4) && edgeDist(x, z) < MAP.PLAY - 1;
-  }, [0.7, 1.3], [0.95, 1, 0.9]);
+  }, [0.7, 1.3], [0.95, 1, 0.9], { low: true, kind: 'fern' });
   // черничник — ковром на опушках
   place(Math.round(7000 * Q.ferns), M.shrub, clumpGeo(2, 0.7, 0.42, 1), (x, z) => {
     const d = forestDensity(x, z);
     return R() < 0.25 + d * 0.5 && isFree(x, z, 0.35, { pathPad: 0.2, trenchPad: 0.8 }) && !treeNear(x, z, 0.3);
-  }, [0.7, 1.4], [1, 1, 1]);
+  }, [0.7, 1.4], [1, 1, 1], { low: true, kind: 'shrub' });
   // подрост ёлок: укрытие от взгляда, но не от пули
   const sap = saplingGeo();
   place(Math.round(1400 * Q.trees), M.spruce, sap, (x, z) => {
     const d = forestDensity(x, z);
     return R() < d * 0.7 && isFree(x, z, 0.6, { pathPad: 0.8, trenchPad: 1.2 }) && !treeNear(x, z, 1.2) && edgeDist(x, z) < MAP.FENCE;
-  }, [1.2, 3.2], [0.8, 0.95, 0.85]);
+  }, [1.2, 3.2], [0.8, 0.95, 0.85], { far: 170, soft: 0.22, softH: 1, kind: 'sapling', cast: Q.shadowTrees });
 }
 /** Папоротник: вайи веером от центра, наклонены наружу. */
 function fernGeo() {

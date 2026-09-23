@@ -305,7 +305,10 @@ const SPECIES = {
   pine: { make: pineVariant, n: 3, bark: 'barkPine', foliage: 'pine' },
   birch: { make: birchVariant, n: 2, bark: 'barkBirch', foliage: 'birch' }
 };
-const LODS = [];                 // по варианту: {trunkIM, hiIM, loIM, trees:[]}
+const LODS = [];                 // варианты: {hi, lo, trees, trunkIM, hiIM, loIM}
+const CORES = [];                // сердцевины крон по виду
+const CELLS = new Map();         // ячейки 24 м для отсечения
+const CELL = 24;
 let farIM = null;
 
 function chooseSpecies(x, z, R) {
@@ -318,7 +321,7 @@ function chooseSpecies(x, z, R) {
 export function buildForest() {
   const R = rng(9001);
   M.spruce.vertexColors = M.pine.vertexColors = M.birch.vertexColors = true;
-  const windCrown = { amp: 0.55, stiff: 2.2, refH: 18, flutter: 0.035, blast: 0.6 };
+  const windCrown = { amp: 0.6, stiff: 2.2, refH: 18, flutter: 0.035, blast: 0.6, branch: 0.0055 };
   const windTrunk = { amp: 0.55, stiff: 2.2, refH: 18, flutter: 0, blast: 0.6 };
   for (const k of ['spruce', 'pine', 'birch']) injectWind(M[k], windCrown);
   for (const k of ['barkSpruce', 'barkPine', 'barkBirch']) injectWind(M[k], windTrunk);
@@ -362,10 +365,10 @@ export function buildForest() {
     const k = tkey(x, z);
     if (!TREE_GRID.has(k)) TREE_GRID.set(k, []);
     TREE_GRID.get(k).push(t);
-    if (e < MAP.FENCE + 1) addCircle(x, z, Math.max(0.18, t.r * 1.05), t.y, t.y + h);
+    if (e < MAP.FENCE + 1) t.col = addCircle(x, z, Math.max(0.2, t.r * 1.1), t.y, t.y + h);
   }
 
-  // 3) инстанс-меши: ствол (все деревья варианта), крона hi и lo
+  // 3) инстанс-меши: ствол, крона hi и lo. Состав пересобирается по видимости ячеек
   for (const [name, list] of Object.entries(variants)) {
     const sp = SPECIES[name];
     for (const v of list) {
@@ -376,33 +379,40 @@ export function buildForest() {
       const loIM = new THREE.InstancedMesh(v.lo.crown, M[sp.foliage], n);
       for (const im of [trunkIM, hiIM, loIM]) {
         im.castShadow = Q.shadowTrees; im.receiveShadow = true; im.frustumCulled = false;
+        im.instanceMatrix.setUsage(THREE.DynamicDrawUsage);
         scene.add(im);
       }
+      trunkIM.castShadow = true;
       hiIM.customDepthMaterial = loIM.customDepthMaterial = depthFor(M[sp.foliage], windCrown);
-      trunkIM.receiveShadow = true;
       const m = new THREE.Matrix4(), q = new THREE.Quaternion(), p = new V3(), sc = new V3(), col = new THREE.Color();
-      v.trees.forEach((t, i) => {
+      v.trees.forEach(t => {
         p.set(t.x, t.y, t.z); q.setFromAxisAngle(new V3(0, 1, 0), t.rot); sc.setScalar(t.h);
         m.compose(p, q, sc);
         t.matrix = m.clone();
-        trunkIM.setMatrixAt(i, m);
         const k = t.tint;
-        col.setRGB(k, k, k);
-        if (t.dead) col.setRGB(0.55, 0.5, 0.45);
-        trunkIM.setColorAt(i, col);
+        t.barkColor = t.dead ? new THREE.Color(0.55, 0.5, 0.45) : new THREE.Color(k, k, k);
         // тон кроны: ель холоднее, сосна теплее, мёртвые — рыжие
         if (t.dead) col.setRGB(0.95, 0.62, 0.32);
         else if (name === 'spruce') col.setRGB(0.66 * k, 0.8 * k, 0.76 * k);
         else if (name === 'pine') col.setRGB(0.78 * k, 0.86 * k, 0.72 * k);
         else col.setRGB(1.0 * k, 1.02 * k, 0.8 * k);
         t.color = col.clone();
+        t.variant = v;
       });
-      trunkIM.instanceMatrix.needsUpdate = true;
-      if (trunkIM.instanceColor) trunkIM.instanceColor.needsUpdate = true;
-      for (const im of [hiIM, loIM]) { im.count = 0; im.setColorAt(0, col); }
-      LODS.push({ trunkIM, hiIM, loIM, trees: v.trees, dead: false });
+      for (const im of [trunkIM, hiIM, loIM]) { im.count = 0; im.setColorAt(0, col); im.instanceColor.setUsage(THREE.DynamicDrawUsage); }
+      v.trunkIM = trunkIM; v.hiIM = hiIM; v.loIM = loIM; v.sp = sp; v.name = name;
+      LODS.push(v);
     }
   }
+  // сетка ячеек для отсечения по пирамиде видимости
+  for (const t of TREES) {
+    const k = Math.floor(t.x / CELL) * 4096 + Math.floor(t.z / CELL);
+    let c = CELLS.get(k);
+    if (!c) { c = { x: (Math.floor(t.x / CELL) + 0.5) * CELL, z: (Math.floor(t.z / CELL) + 0.5) * CELL, y: 0, top: 0, trees: [] }; CELLS.set(k, c); }
+    c.trees.push(t);
+    c.y += t.y; c.top = Math.max(c.top, t.h);
+  }
+  for (const c of CELLS.values()) { c.y /= c.trees.length; c.sphere = new THREE.Sphere(new V3(c.x, c.y + c.top * 0.5, c.z), CELL * 0.72 + c.top * 0.5); }
   // мёртвые деревья минной полосы остаются голыми стволами (крона не выводится в LOD)
   buildCores(variants);
   buildFarForest(R);
@@ -417,11 +427,10 @@ function buildCores(variants) {
     const trees = variants[name].flatMap(v => v.trees).filter(t => !t.dead);
     if (!trees.length) continue;
     const im = new THREE.InstancedMesh(farGeo(quad, w, false), mat, trees.length);
-    const col = new THREE.Color();
-    trees.forEach((t, i) => {
-      im.setMatrixAt(i, t.matrix);
-      col.copy(t.color).multiplyScalar(0.85); im.setColorAt(i, col);
-    });
+    trees.forEach(t => { t.coreColor = t.color.clone().multiplyScalar(0.85); t.core = CORES.length; });
+    im.count = 0; im.setColorAt(0, trees[0].coreColor);
+    im.instanceMatrix.setUsage(THREE.DynamicDrawUsage); im.instanceColor.setUsage(THREE.DynamicDrawUsage);
+    CORES.push(im);
     im.castShadow = Q.shadowTrees; im.receiveShadow = true; im.frustumCulled = false;
     im.customDepthMaterial = depthFor(mat, { amp: 0.5, stiff: 2.2, refH: 18, flutter: 0, blast: 0.5 });
     im.name = 'tree_cores_' + name;
@@ -461,32 +470,74 @@ function buildFarForest(R) {
   farIM = { count: total };
 }
 
-/** Перераспределение деревьев между детальной и простой кроной. */
+/** Видимые ячейки → списки инстансов: ствол, крона (hi/lo по дистанции), сердцевина.
+    Пирамида берётся шире кадра, поэтому пересборка нужна только после заметного
+    поворота или шага, а не каждый кадр. Ближние ячейки видны всегда — их тени
+    падают в кадр и из-за спины. */
 let lastLOD = new V3(1e9, 0, 0);
+const lastQ = new THREE.Quaternion(0, 0, 0, 0);
+const _wideCam = new THREE.PerspectiveCamera(), _frus = new THREE.Frustum(), _pm = new THREE.Matrix4();
+function writeInst(im, n, m, c) {
+  im.instanceMatrix.array.set(m.elements, n * 16);
+  const a = im.instanceColor.array, j = n * 3;
+  a[j] = c.r; a[j + 1] = c.g; a[j + 2] = c.b;
+}
 export function updateForestLOD(force) {
   const cp = camera.position;
-  if (!force && lastLOD.distanceToSquared(cp) < 16) return;
-  lastLOD.copy(cp);
+  const turned = 1 - Math.abs(lastQ.dot(camera.quaternion));
+  if (!force && lastLOD.distanceToSquared(cp) < 4 && turned < 0.002) return;
+  lastLOD.copy(cp); lastQ.copy(camera.quaternion);
+  _wideCam.copy(camera, false);
+  _wideCam.fov = Math.min(170, camera.fov + 34); _wideCam.aspect = camera.aspect * 1.25; _wideCam.far = camera.far;
+  _wideCam.position.copy(cp); _wideCam.quaternion.copy(camera.quaternion);
+  _wideCam.updateProjectionMatrix(); _wideCam.updateMatrixWorld(true);
+  _frus.setFromProjectionMatrix(_pm.multiplyMatrices(_wideCam.projectionMatrix, _wideCam.matrixWorldInverse));
   const R2 = Q.treeNearR * Q.treeNearR;
-  for (const L of LODS) {
-    let hi = 0, lo = 0;
-    for (const t of L.trees) {
+  for (const L of LODS) { L.nT = 0; L.nH = 0; L.nL = 0; }
+  const nC = CORES.map(() => 0);
+  for (const c of CELLS.values()) {
+    const dx0 = c.x - cp.x, dz0 = c.z - cp.z;
+    if (dx0 * dx0 + dz0 * dz0 > 60 * 60 && !_frus.intersectsSphere(c.sphere)) continue;
+    for (const t of c.trees) {
+      if (t.gone) continue;
+      const L = t.variant;
+      writeInst(L.trunkIM, L.nT++, t.matrix, t.barkColor);
       if (t.dead) continue;
       const dx = t.x - cp.x, dy = t.y + t.h * 0.5 - cp.y, dz = t.z - cp.z;
-      const d2 = dx * dx + dy * dy + dz * dz;
-      if (d2 < R2) { L.hiIM.setMatrixAt(hi, t.matrix); L.hiIM.setColorAt(hi, t.color); hi++; }
-      else { L.loIM.setMatrixAt(lo, t.matrix); L.loIM.setColorAt(lo, t.color); lo++; }
+      if (dx * dx + dy * dy + dz * dz < R2) writeInst(L.hiIM, L.nH++, t.matrix, t.color);
+      else writeInst(L.loIM, L.nL++, t.matrix, t.color);
+      if (t.core !== undefined) writeInst(CORES[t.core], nC[t.core]++, t.matrix, t.coreColor);
     }
-    L.hiIM.count = hi; L.loIM.count = lo;
-    L.hiIM.instanceMatrix.needsUpdate = true; L.loIM.instanceMatrix.needsUpdate = true;
-    if (L.hiIM.instanceColor) L.hiIM.instanceColor.needsUpdate = true;
-    if (L.loIM.instanceColor) L.loIM.instanceColor.needsUpdate = true;
   }
+  const flag = (im, n) => {
+    im.count = n;
+    if (!n) return;
+    im.instanceMatrix.clearUpdateRanges(); im.instanceMatrix.addUpdateRange(0, n * 16); im.instanceMatrix.needsUpdate = true;
+    im.instanceColor.clearUpdateRanges(); im.instanceColor.addUpdateRange(0, n * 3); im.instanceColor.needsUpdate = true;
+  };
+  for (const L of LODS) { flag(L.trunkIM, L.nT); flag(L.hiIM, L.nH); flag(L.loIM, L.nL); }
+  CORES.forEach((im, i) => flag(im, nC[i]));
+}
+/** Дерево убрано из статичных инстансов (срублено взрывом). */
+export function removeTree(t) {
+  t.gone = true;
+  t.col && (t.col.dead = true);
+  updateForestLOD(true);
+}
+/** Деревья в радиусе — для разрушений. */
+export function treesNear(x, z, r, out = []) {
+  for (let i = -1; i <= 1; i++) for (let j = -1; j <= 1; j++) {
+    const L = TREE_GRID.get(tkey(x + i * 6, z + j * 6));
+    if (!L) continue;
+    for (const t of L) if (!t.gone && Math.hypot(t.x - x, t.z - z) < r) out.push(t);
+  }
+  return out;
 }
 export function forestStats() {
   let hi = 0, lo = 0;
-  for (const L of LODS) { hi += L.hiIM.count; lo += L.loIM.count; }
-  return { trees: TREES.length, hi, lo, far: farIM ? farIM.count : 0 };
+  let trunks = 0;
+  for (const L of LODS) { hi += L.hiIM.count; lo += L.loIM.count; trunks += L.trunkIM.count; }
+  return { trees: TREES.length, hi, lo, trunks, far: farIM ? farIM.count : 0 };
 }
 
 /** Подрост: маленькая ель (только лапы, ствол под ними не виден). */

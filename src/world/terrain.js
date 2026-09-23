@@ -3,6 +3,7 @@ import { scene, Q } from '../core/env.js';
 import { MAP, terrainH, splat, edgeDist, TRENCHES, CRATERS, PADS, lakeRho, pathInfluence } from './layout.js';
 import { TEX } from '../gen/materials.js';
 import { forestDensity } from './forest.js';
+import { windUniforms } from './wind.js';
 
 /* ============================================================================
    МЕШ РЕЛЬЕФА
@@ -12,7 +13,51 @@ import { forestDensity } from './forest.js';
    границах чанков нет швов освещения.
 ============================================================================ */
 const CH = 16, INNER = 136;
-export const TERRAIN = { chunks: [], mat: null };
+export const TERRAIN = { chunks: [], mat: null, ao: { value: null } };
+const AO_R = 136, AO_S = 0.5, AO_N = Math.round(AO_R * 2 / AO_S);
+{
+  const t = new THREE.DataTexture(new Uint8Array([255, 255, 255, 255]), 1, 1);
+  t.needsUpdate = true;
+  TERRAIN.ao.value = t;
+}
+/** Запечь затенение земли: мягкие пятна у стволов, под бревнами, машинами и
+    стенами. Предметы «садятся» на землю, а не парят над ней. */
+export function bakeGroundAO(trees, colliders) {
+  const c = document.createElement('canvas');
+  c.width = c.height = AO_N;
+  const x = c.getContext('2d');
+  x.fillStyle = '#fff'; x.fillRect(0, 0, AO_N, AO_N);
+  const px = v => (v + AO_R) / AO_S;
+  x.globalCompositeOperation = 'multiply';
+  const blob = (cx, cz, r, a) => {
+    const g = x.createRadialGradient(px(cx), px(cz), 0, px(cx), px(cz), r / AO_S);
+    const k = Math.round(255 * (1 - a));
+    g.addColorStop(0, `rgb(${k},${k},${k})`); g.addColorStop(1, '#fff');
+    x.fillStyle = g; x.beginPath(); x.arc(px(cx), px(cz), r / AO_S, 0, 7); x.fill();
+  };
+  for (const t of trees) {
+    if (Math.max(Math.abs(t.x), Math.abs(t.z)) > AO_R) continue;
+    blob(t.x, t.z, 0.6 + t.r * 7, 0.55);           // комель
+    if (!t.dead) blob(t.x, t.z, t.h * 0.17, 0.16);  // крона
+  }
+  for (const k of colliders) {
+    if (k.soft || k.dead) continue;
+    if (k.y0 > terrainH(k.x, k.z) + 0.8) continue;
+    if (k.t === 0) { if (k.y1 - k.y0 < 5) blob(k.x, k.z, k.r * 1.9 + 0.2, 0.5); continue; }   // стволы уже учтены
+    // бокс у земли: размытая тень по периметру пятна
+    x.save();
+    x.translate(px(k.x), px(k.z)); x.rotate(-Math.atan2(k.s, k.c));
+    x.filter = 'blur(2px)';
+    const w = (k.hw * 2 + 0.5) / AO_S, d = (k.hd * 2 + 0.5) / AO_S;
+    x.fillStyle = 'rgb(110,110,110)';
+    x.fillRect(-w / 2, -d / 2, w, d);
+    x.restore();
+  }
+  const t = new THREE.CanvasTexture(c);
+  t.colorSpace = THREE.NoColorSpace; t.flipY = false;
+  t.magFilter = t.minFilter = THREE.LinearFilter; t.generateMipmaps = false;
+  TERRAIN.ao.value = t;
+}
 
 function chunkStep(x0, z0) {
   const pad = 3.5, x1 = x0 + CH, z1 = z0 + CH;
@@ -115,7 +160,8 @@ function groundMaterial() {
     tPath: { value: TEX.path.map }, tPathN: { value: TEX.path.normal },
     tMud: { value: TEX.mud.map }, tMudN: { value: TEX.mud.normal },
     tDug: { value: TEX.dug.map }, tDugN: { value: TEX.dug.normal },
-    uWet: { value: 0 }
+    uWet: { value: 0 }, uTime: windUniforms.uTime, uWaterY: { value: MAP.WATER_Y },
+    tAO: TERRAIN.ao, uAOM: { value: new THREE.Vector4(-AO_R, 1 / (AO_S * AO_N), 0, 0) }
   };
   m.onBeforeCompile = sh => {
     Object.assign(sh.uniforms, U);
@@ -123,8 +169,20 @@ function groundMaterial() {
       sh.vertexShader.replace('#include <begin_vertex>', '#include <begin_vertex>\nvSplat = aSplat;\nvWPos = (modelMatrix * vec4(transformed,1.0)).xyz;\nvWN = normalize(mat3(modelMatrix) * objectNormal);');
     sh.fragmentShader = /* glsl */`
       uniform sampler2D tFloor, tFloorN, tPath, tPathN, tMud, tMudN, tDug, tDugN;
-      uniform float uWet;
-      varying vec4 vSplat; varying vec3 vWPos; varying vec3 vWN;
+      uniform float uWet, uTime, uWaterY;
+      uniform sampler2D tAO; uniform vec4 uAOM;
+      varying vec4 vSplat;
+      // каустика: свет, собранный рябью в сетку бликов на дне
+      float caustic(vec2 p, float t) {
+        vec2 i = p; float c = 1.0;
+        for (int n = 0; n < 4; n++) {
+          float tt = t * (1.0 - 3.5 / float(n + 1));
+          i = p + vec2(cos(tt - i.x) + sin(tt + i.y), sin(tt - i.y) + cos(tt + i.x));
+          c += 1.0 / length(vec2(p.x / (sin(i.x + tt) / 0.005), p.y / (cos(i.y + tt) / 0.005)));
+        }
+        c = 1.17 - pow(c / 4.0, 1.4);
+        return pow(abs(c), 8.0);
+      } varying vec3 vWPos; varying vec3 vWN;
       float gHash(vec2 p){ return fract(sin(dot(p, vec2(127.1, 311.7))) * 43758.5453); }
       float gNoise(vec2 p){ vec2 i = floor(p), f = fract(p); f = f*f*(3.0-2.0*f);
         return mix(mix(gHash(i), gHash(i+vec2(1,0)), f.x), mix(gHash(i+vec2(0,1)), gHash(i+vec2(1,1)), f.x), f.y); }
@@ -158,8 +216,24 @@ function groundMaterial() {
         gW = vec3(wP, wM, wD);
         // затопленный берег темнее, дно под водой — ещё темнее
         col *= mix(1.0, 0.55, smoothstep(0.35, 0.95, vSplat.y) * (1.0 - wP));
+        // запечённое затенение: у комлей, под машинами и стенами земля темнее
+        float ao = texture2D(tAO, (vWPos.xz - uAOM.x) * uAOM.y + uAOM.z).r;
+        col *= mix(0.35, 1.0, ao);
         diffuseColor.rgb *= col;
       `)
+      .replace('#include <lights_fragment_begin>', /* glsl */`#include <lights_fragment_begin>
+        #if NUM_DIR_LIGHTS > 0
+          vec3 gSun = directLight.color;
+        #else
+          vec3 gSun = vec3(0.0);
+        #endif`)
+      .replace('#include <opaque_fragment>', /* glsl */`
+        if (vWPos.y < uWaterY) {
+          float dep = uWaterY - vWPos.y;
+          float cs = caustic(vWPos.xz * 0.55 + 20.0, uTime * 0.55) + caustic(vWPos.xz * 1.1 - 7.0, uTime * 0.7 + 3.0) * 0.5;
+          outgoingLight += diffuseColor.rgb * gSun * cs * 1.8 * exp(-dep * 0.8) * smoothstep(0.02, 0.2, dep);
+        }
+        #include <opaque_fragment>`)
       .replace('#include <roughnessmap_fragment>', /* glsl */`
         float roughnessFactor = roughness;
         roughnessFactor = mix(roughnessFactor, 0.82, gW.x);
@@ -180,7 +254,7 @@ function groundMaterial() {
         }
       `);
   };
-  m.customProgramCacheKey = () => 'ground-v1';
+  m.customProgramCacheKey = () => 'ground-v2';
   return m;
 }
 

@@ -10,6 +10,7 @@ import { addLamp } from './lamps.js';
 import { makeCloth } from './cloth.js';
 import { vehicle } from './vehicles.js';
 import { injectWind } from './wind.js';
+import { addCrate } from './destruct.js';
 
 /* ============================================================================
    ФРОНТ: окопы, базы команд, минное поле
@@ -235,11 +236,10 @@ function camoNet(x, z, rot, w, d, R) {
     pinFn: (i, j) => ((i === 0 || i === nx - 1) && (j === 0 || j === ny - 1)) || (i === Math.floor(nx / 2) && j === Math.floor(ny / 2))
   });
 }
+/** Ящики склада — разрушаемые (см. destruct.js), стопкой до двух. */
 function crate(x, z, rot, R, stack = 1) {
-  const y = hFast(x, z);
-  for (let k = 0; k < stack; k++) {
-    box(M.crate, x, y + 0.2 + k * 0.4, z, 1.0, 0.4, 0.55, { rot: rot + k * R.range(-0.2, 0.2), tile: 0.8, collide: true });
-  }
+  let top = null;
+  for (let k = 0; k < stack; k++) top = addCrate(x, z, rot + k * R.range(-0.2, 0.2), 0, top);
 }
 function barrelStatic(x, z, R) {
   const y = hFast(x, z);

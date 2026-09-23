@@ -5,6 +5,7 @@ import { clamp, lerp, smoothstep, DEG, srnd, TAU } from '../core/math.js';
 import { cv, tex, blob } from '../gen/canvas.js';
 import { WIND } from './wind.js';
 import { hFast } from './heightcache.js';
+import { ATMO } from '../core/atmosphere.js';
 
 /* ============================================================================
    СУТКИ: утро → день → закат → сумерки → ночь → рассвет
@@ -189,12 +190,19 @@ export function updateSky(dt) {
   dir.position.copy(_tgt).addScaledVector(L, 200);
   dir.target.updateMatrixWorld();
 
-  hemi.color.setRGB(...k.hs); hemi.groundColor.setRGB(...k.hg); hemi.intensity = k.hI;
+  hemi.color.setRGB(...k.hs); hemi.groundColor.setRGB(...k.hg); hemi.intensity = k.hI * 1.18;
   amb.intensity = 0.1 + night * 0.06;
   scene.fog.color.setRGB(...k.fog);
   SKY.fogColor.copy(scene.fog.color);
-  // с высоты видно дальше: туман в лесу гуще, чем над кронами
-  scene.fog.density = k.fogD * lerp(1, 0.22, smoothstep(8, 90, agl));
+  // высотный туман: основание у земли под камерой, слой ~14 м; с дрона видно дальше
+  const gH = camera.position.y - agl;
+  scene.fog.density = k.fogD * lerp(1.05, 0.5, smoothstep(10, 110, agl));
+  ATMO.height.set(gH - 1.5, 1 / lerp(14, 22, night), 0.85, 0);
+  // дымка светится в сторону солнца (ночью — луны), сильнее всего на закате и рассвете
+  ATMO.sunDir.copy(useSun ? _d : _m);
+  const low = 1 - smoothstep(0.05, 0.5, Math.abs(L.y));
+  const glow = useSun ? I * (0.05 + low * 0.14) : moonUp * 0.03;
+  ATMO.sunColor.set(dir.color.r * glow, dir.color.g * glow, dir.color.b * glow);
   renderer.toneMappingExposure = k.exp;
 
   // светила

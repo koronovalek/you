@@ -43,3 +43,16 @@ function grassDensityExact(x, z) {
   if (td < 2.2) d += 0.3;                                     // на брустверах
   return clamp(d, 0, 1.3);
 }
+/** Сырые сетки для GPU (трава берёт высоту и плотность из текстур). */
+export const heightGrid = () => ({ H, HN, HS, R, GD, DN, DS });
+/** Низшая точка земли под прямоугольным основанием: предмет ставится на неё и
+    «врастает» верхней стороной склона, а не висит нижним углом в воздухе. */
+export function groundMin(x, z, hw = 0, hd = hw, rot = 0) {
+  const c = Math.cos(rot), s = Math.sin(rot);
+  let m = hFast(x, z);
+  for (const [a, b] of [[1, 1], [1, -1], [-1, 1], [-1, -1], [1, 0], [-1, 0], [0, 1], [0, -1]]) {
+    const lx = a * hw, lz = b * hd;
+    m = Math.min(m, hFast(x + lx * c + lz * s, z - lx * s + lz * c));
+  }
+  return m;
+}
