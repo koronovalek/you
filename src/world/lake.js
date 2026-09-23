@@ -57,17 +57,16 @@ const WATER_FS = /* glsl */`
     vec2 wd = uWindDir;
     vec2 wp = vec2(-wd.y, wd.x);
     float t = uTime;
-    // пятна ряби бегут по ветру: там, где порыв касается воды, она темнеет и мельчит
-    vec2 gq = uv * 0.06 - wd * t * 0.09;
-    float paws = smoothstep(0.42, 0.78, wn(gq) * 0.65 + wn(gq * 2.3 + 5.1) * 0.35);
-    float calm = 0.12 + uWind * 0.4;
-    float rough = calm * (0.35 + paws * (0.9 + uGust * 0.8));
-    vec2 s1 = nrm(uv * 0.045 + wd * t * 0.012 + wp * t * 0.003);
-    vec2 s2 = nrm(uv * 0.11 - wp * t * 0.01 + wd * t * 0.017);
-    vec2 s3 = nrm(uv * 0.33 + wd * t * 0.05);
-    vec2 s4 = nrm(uv * 0.9 + wd * t * 0.11 + wp * t * 0.03);
-    vec2 slope = (s1 * 0.5 + s2 * 0.4) * (0.025 + rough * 0.1) + (s3 * 0.5 + s4 * 0.35) * rough * 0.28;
-    // кольца: взрывы, дрон, рыба, шаги вброд
+    // пятна ряби бегут по ветру; между ними вода почти зеркальная
+    vec2 gq = uv * 0.05 - wd * t * 0.07;
+    float paws = smoothstep(0.45, 0.8, wn(gq) * 0.65 + wn(gq * 2.3 + 5.1) * 0.35);
+    float rough = (0.12 + uWind * 0.35) * (0.35 + paws * (0.8 + uGust * 0.6));
+    vec2 s1 = nrm(uv * 0.035 + wd * t * 0.010 + wp * t * 0.002);
+    vec2 s2 = nrm(uv * 0.09 - wp * t * 0.008 + wd * t * 0.014);
+    vec2 s3 = nrm(uv * 0.27 + wd * t * 0.04);
+    vec2 s4 = nrm(uv * 0.71 + wd * t * 0.09 + wp * t * 0.02);
+    // крупная зыбь всегда чуть-чуть есть, мелкая рябь — только в пятнах порыва
+    vec2 slope = (s1 * 0.6 + s2 * 0.4) * 0.028 + (s3 * 0.6 + s4 * 0.4) * rough * 0.16;
     for (int i = 0; i < 8; i++) {
       vec4 r = uRip[i];
       float age = t - r.z;
@@ -77,51 +76,45 @@ const WATER_FS = /* glsl */`
       float x = dist - front;
       float ring = sin(x * (9.0 - r.w * 3.0)) * exp(-x * x * (2.5 / (0.3 + r.w))) * exp(-age * 0.55) * min(r.w, 1.5);
       ring *= smoothstep(0.0, 0.25, dist);
-      slope += (dist > 0.01 ? d / dist : vec2(0.0)) * ring * 0.55;
+      slope += (dist > 0.01 ? d / dist : vec2(0.0)) * ring * 0.35;
     }
     float rho = lakeRhoW(uv);
-    // ряска и пыльца в заводях у берега и в камыше
+    // ряска в заводях у берега
     float weedN = wn(uv * 0.35 + 3.0) * 0.6 + wn(uv * 1.3) * 0.4;
-    float weed = smoothstep(0.86, 0.97, rho) * smoothstep(0.52, 0.7, weedN) * (1.0 - smoothstep(0.35, 0.6, vDepth));
-    slope *= 1.0 - weed * 0.85;
+    float weed = smoothstep(0.88, 0.98, rho) * smoothstep(0.55, 0.72, weedN) * (1.0 - smoothstep(0.3, 0.55, vDepth));
+    slope *= 1.0 - weed * 0.9;
     vec3 n = normalize(vec3(slope.x, 1.0, slope.y));
     vec3 V = normalize(cameraPosition - vW);
-    float ndv = max(dot(V, n), 0.0);
-    float fres = 0.02 + 0.98 * pow(1.0 - ndv, 5.0);
+    float ndv = clamp(dot(V, n), 0.0, 1.0);
+    // Шлик для воды: F0 = 0.02
+    float F = 0.02 + 0.98 * pow(1.0 - ndv, 5.0);
     vec3 refl = uSky;
     if (uHasRefl > 0.5) {
-      vec4 ruv = vRUV; ruv.xy += slope * 0.07 * ruv.w;
+      vec4 ruv = vRUV; ruv.xy += slope * 0.9 * ruv.w * 0.05;
       refl = texture2DProj(tRefl, ruv).rgb;
     }
-    // толща воды вдоль луча зрения: у берега прозрачно, на глубине — чёрный чай
-    float thick = vDepth / max(ndv, 0.12);
-    vec3 absorb = vec3(0.55, 0.9, 1.6);
-    vec3 T3 = exp(-thick * absorb * 1.35);
+    refl = min(refl, vec3(4.0));
+    // толща вдоль луча: у берега видно дно, на глубине — тёмная торфяная вода
+    float thick = vDepth / max(ndv, 0.15);
+    vec3 T3 = exp(-thick * vec3(0.9, 1.25, 1.9));
     float T = dot(T3, vec3(0.3, 0.5, 0.2));
-    vec3 scatter = mix(uShallow, uDeep, smoothstep(0.1, 2.2, vDepth));
-    vec3 body = scatter * (1.0 - T);
-    // солнце: широкий блик-дорожка и острые искры на гребнях
+    vec3 body = mix(uShallow, uDeep, smoothstep(0.1, 2.0, vDepth)) * (1.0 - T);
+    // альфа пропускает дно (его рисует рельеф под водой); остальное — отражение и толща
+    float Fw = F * (1.0 - weed * 0.85);
+    float a = clamp(1.0 - (1.0 - Fw) * T, 0.0, 1.0);
+    vec3 col = (refl * Fw + (1.0 - Fw) * body) / max(a, 0.02);
+    col = mix(col, uWeed * (0.75 + 0.5 * wn(uv * 6.0)), weed * 0.85);
+    a = max(a, weed * 0.92);
+    // солнечная дорожка: узкий блик, ограниченный по яркости
     vec3 H = normalize(uSunDir + V);
     float ndh = max(dot(n, H), 0.0);
-    float sunUp = step(0.0, uSunDir.y);
-    float spec = pow(ndh, 900.0) * 9.0 + pow(ndh, 90.0) * 0.35 * (0.3 + rough);
-    float sparkle = step(0.9985, ndh) * step(0.72, wh(floor(uv * 14.0) + floor(t * 9.0)));
-    vec3 sun = uSunCol * (spec + sparkle * 14.0 * rough) * sunUp * (1.0 - weed);
+    float spec = min(pow(ndh, 1400.0) * 6.0 + pow(ndh, 160.0) * 0.25, 6.0) * step(0.0, uSunDir.y) * (1.0 - weed);
     vec3 Hm = normalize(uMoonDir + V);
-    sun += vec3(0.55, 0.65, 0.85) * pow(max(dot(n, Hm), 0.0), 600.0) * 2.2 * uNight * step(0.0, uMoonDir.y);
-    // композиция: отражение по Френелю поверх света из толщи; альфа пропускает дно
-    float F = clamp(fres * (1.0 - weed * 0.8), 0.0, 1.0);
-    float a = 1.0 - (1.0 - F) * T;
-    vec3 col = (refl * F + (1.0 - F) * body) / max(a, 0.001);
-    vec3 weedCol = uWeed * (0.75 + 0.5 * wn(uv * 6.0));
-    col = mix(col, weedCol, weed * 0.85);
-    a = max(a, weed * 0.9);
-    col += sun / max(a, 0.2);
-    // мокрая кромка: тонкая светлая линия, дышит вместе с рябью
-    float edge = 1.0 - smoothstep(0.0, 0.06, vDepth);
-    float lap = 0.5 + 0.5 * sin(vDepth * 90.0 - t * 1.8 + wn(uv * 0.8) * 6.0);
-    col = mix(col, uSky * 0.55 + uShallow, edge * lap * 0.35);
-    a *= smoothstep(-0.015, 0.05, vDepth);
+    float mspec = min(pow(max(dot(n, Hm), 0.0), 900.0) * 2.0, 2.0) * uNight * step(0.0, uMoonDir.y);
+    col += (uSunCol * spec + vec3(0.55, 0.65, 0.85) * mspec) * F * 4.0 / max(a, 0.3);
+    a = max(a, clamp(spec * F * 4.0, 0.0, 1.0));
+    // мокрая полоса у самого уреза чуть темнее, без светлой «обводки»
+    a *= smoothstep(-0.01, 0.06, vDepth);
     if (a < 0.004) discard;
     gl_FragColor = vec4(col, a);
     #include <tonemapping_fragment>
@@ -254,13 +247,13 @@ function reedClump(R, cattail) {
   for (let b = 0; b < blades; b++) {
     const a = R() * TAU, r = Math.sqrt(R()) * 0.28, ox = Math.cos(a) * r, oz = Math.sin(a) * r;
     const face = R() * TAU, fx = Math.cos(face), fz = Math.sin(face);
-    const h = R.range(1.1, 2.3), w = R.range(0.02, 0.035), lean = R.range(0.1, 0.5), dry = R() < 0.25;
+    const h = R.range(1.1, 2.3), w = R.range(0.02, 0.035), lean = R.range(0.1, 0.5), dry = R() < 0.14;
     const segs = 4, base = pos.length / 3;
     for (let k = 0; k <= segs; k++) {
       const t = k / segs, bend = lean * t * t;
       const cx = ox + fx * bend * h * 0.5, cz = oz + fz * bend * h * 0.5, y = t * h - bend * h * 0.15;
       const ww = w * (1 - t * 0.92);
-      const g = dry ? [0.55 + t * 0.2, 0.48 + t * 0.12, 0.25] : [0.2 + t * 0.2, 0.3 + t * 0.2, 0.08 + t * 0.06];
+      const g = dry ? [0.34 + t * 0.12, 0.3 + t * 0.08, 0.16] : [0.12 + t * 0.1, 0.2 + t * 0.12, 0.05 + t * 0.03];
       const ao = 0.45 + t * 0.55;
       for (const sgn of [-1, 1]) {
         pos.push(cx - fz * ww * sgn, y, cz + fx * ww * sgn);
@@ -317,7 +310,7 @@ function buildReeds() {
   const mat = new THREE.MeshStandardMaterial({ vertexColors: true, roughness: 0.75, side: THREE.DoubleSide });
   mat.emissive = new THREE.Color(0x060a03);
   injectWind(mat, { amp: 0.4, stiff: 1.6, refH: 2.2, flutter: 0.05, trample: true, blast: 1.3 });
-  addTranslucency(mat, 0.9);
+  addTranslucency(mat, 0.6);
   M.reedBlades = mat;
   const geos = [reedClump(R, false), reedClump(R, true), reedClump(R, false), reedClump(R, true)];
   const pts = [];
@@ -599,7 +592,7 @@ export function updateLake(sky) {
   u.uTime.value = FRAME.t;
   u.uSunDir.value.copy(sky.sunDir);
   u.uMoonDir.value.copy(sky.sunDir).multiplyScalar(-1);
-  u.uSunCol.value.copy(sky.sunColor).multiplyScalar(sky.sunI * 0.25);
+  u.uSunCol.value.copy(sky.sunColor).multiplyScalar(Math.min(sky.sunI, 5) * 0.2);
   u.uSky.value.copy(sky.fogColor).multiplyScalar(0.9);
   u.uNight.value = sky.night;
   u.uWind.value = sky.wind;
@@ -607,6 +600,8 @@ export function updateLake(sky) {
   u.uWindDir.value.copy(WIND.dir);
   u.uWeed.value.setRGB(lerp(0.05, 0.006, sky.night), lerp(0.075, 0.009, sky.night), lerp(0.018, 0.006, sky.night));
   // вода темнеет к ночи, днём — торфяная
-  u.uDeep.value.setRGB(lerp(0.014, 0.004, sky.night), lerp(0.02, 0.006, sky.night), lerp(0.016, 0.01, sky.night));
-  u.uShallow.value.setRGB(lerp(0.07, 0.012, sky.night), lerp(0.062, 0.013, sky.night), lerp(0.04, 0.016, sky.night));
+  // рассеяние в толще освещается небом: цвет воды следует за временем суток
+  const L = 0.35 + 0.65 * (1 - sky.night);
+  u.uDeep.value.setRGB(0.010 * L, 0.014 * L, 0.011 * L);
+  u.uShallow.value.setRGB(0.055 * L, 0.05 * L, 0.03 * L);
 }

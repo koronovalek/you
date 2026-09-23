@@ -5,6 +5,8 @@ import { addPad, keep, terrainH, CLUSTERS, pathInfluence } from './layout.js';
 import { M, TEX } from '../gen/materials.js';
 import { box, cyl, place, frame } from './builders.js';
 import { addBox, addCircle as addCircle2 } from '../core/colliders.js';
+import { addBreakable } from './destruct.js';
+import { groundMin } from './heightcache.js';
 import { addLamp } from './lamps.js';
 import { vehicle } from './vehicles.js';
 import { makeCloth } from './cloth.js';
@@ -220,16 +222,17 @@ function well(x, z, rot) {
 /** Поленница: торцы поленьев — инстансы в общем буфере. */
 function woodpile(x, z, rot, len = 3, rows = 5) {
   const R = rng(Math.floor(x * 31 + z * 17));
-  const y = terrainH(x, z);
+  const y = groundMin(x, z, len / 2, 0.3, rot);
   const c = Math.cos(rot), s = Math.sin(rot);
-  const g = new THREE.CylinderGeometry(0.08, 0.08, 0.5, 6);
+  const parts = [];
   for (let r = 0; r < rows; r++) for (let i = 0; i < len / 0.17; i++) {
     if (r === rows - 1 && R() < 0.5) continue;
     const lx = -len / 2 + i * 0.17 + (r % 2) * 0.08 + R.range(-0.02, 0.02);
-    place(M.logEnd, g, x + lx * c, y + 0.09 + r * 0.155, z - lx * s, [Math.PI / 2 + R.range(-0.08, 0.08), rot, 0]);
+    // полено: цилиндр вдоль короткой оси поленницы
+    parts.push({ kind: 'log', x: x + lx * c, y: y + 0.09 + r * 0.155, z: z - lx * s, sx: 0.16, sy: 0.5, sz: 0.16, ry: rot, rx: Math.PI / 2 + R.range(-0.08, 0.08) });
   }
-  box(M.roofRust, x, y + rows * 0.16 + 0.1, z, len + 0.3, 0.03, 0.8, { rot, rx: 0.12, tile: 1.2 });
-  addBox(x, y + rows * 0.08, z, len, rows * 0.16, 0.55, rot);
+  parts.push({ kind: 'sheet', x, y: y + rows * 0.16 + 0.1, z, sx: len + 0.3, sy: 0.03, sz: 0.8, ry: rot, rx: 0.12 });
+  addBreakable(parts, { x, y: y + rows * 0.08, z, sx: len, sy: rows * 0.16, sz: 0.55, rot });
 }
 function outhouse(x, z, rot) {
   const y = terrainH(x, z), F = frame(x, z, rot);
@@ -258,7 +261,8 @@ function sawShed(x, z, rot) {
     const [px, pz] = F.p(lx, 0);
     box(M.planksDark, px, y + 0.35, pz, 0.2, 0.7, 3.2, { rot, tile: 1 });
   }
-  addBox(x, y + 0.85, z, 6, 0.9, 3.2, rot);
+  // бревна на козлах: верх 1.08 м, глубина по краям крайних бревен
+  { const [bx, bz] = F.p(0, -0.14); addBox(bx, y + 0.54, bz, 6, 1.08, 2.9, rot); }
 }
 /* ---------- План кластеров ---------- */
 const T_PLAN = [

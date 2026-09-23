@@ -172,17 +172,28 @@ function groundMaterial() {
       uniform float uWet, uTime, uWaterY;
       uniform sampler2D tAO; uniform vec4 uAOM;
       varying vec4 vSplat;
-      // каустика: свет, собранный рябью в сетку бликов на дне
+      // каустика: свет, собранный рябью в сетку на дне. Клеточный шум — рёбра
+      // ячеек Вороного, медленно плывущие; результат строго в [0, 1].
+      vec2 cHash2(vec2 p){ p = vec2(dot(p, vec2(127.1, 311.7)), dot(p, vec2(269.5, 183.3))); return fract(sin(p) * 43758.5453); }
       float caustic(vec2 p, float t) {
-        vec2 i = p; float c = 1.0;
-        for (int n = 0; n < 4; n++) {
-          float tt = t * (1.0 - 3.5 / float(n + 1));
-          i = p + vec2(cos(tt - i.x) + sin(tt + i.y), sin(tt - i.y) + cos(tt + i.x));
-          c += 1.0 / length(vec2(p.x / (sin(i.x + tt) / 0.005), p.y / (cos(i.y + tt) / 0.005)));
+        vec2 i = floor(p), f = fract(p);
+        float d1 = 8.0, d2 = 8.0;
+        for (int y = -1; y <= 1; y++) for (int x = -1; x <= 1; x++) {
+          vec2 g = vec2(float(x), float(y));
+          vec2 o = cHash2(i + g);
+          o = 0.5 + 0.45 * sin(t + 6.2831 * o);
+          float d = length(g + o - f);
+          if (d < d1) { d2 = d1; d1 = d; } else if (d < d2) d2 = d;
         }
-        c = 1.17 - pow(c / 4.0, 1.4);
-        return pow(abs(c), 8.0);
-      } varying vec3 vWPos; varying vec3 vWN;
+        return clamp(1.0 - smoothstep(0.0, 0.16, d2 - d1), 0.0, 1.0);
+      }
+      float lakeRhoT(vec2 p) {
+        float u = (p.x + p.y) * 0.70710678, v = (p.x - p.y) * 0.70710678;
+        float ph = atan(v, u);
+        float w = 1.0 + 0.07 * sin(2.0 * ph + 1.1) + 0.05 * sin(4.0 * ph + 2.3) + 0.03 * sin(6.0 * ph + 0.7);
+        return length(vec2(u / 36.0, v / 21.0)) / w;
+      }
+ varying vec3 vWPos; varying vec3 vWN;
       float gHash(vec2 p){ return fract(sin(dot(p, vec2(127.1, 311.7))) * 43758.5453); }
       float gNoise(vec2 p){ vec2 i = floor(p), f = fract(p); f = f*f*(3.0-2.0*f);
         return mix(mix(gHash(i), gHash(i+vec2(1,0)), f.x), mix(gHash(i+vec2(0,1)), gHash(i+vec2(1,1)), f.x), f.y); }
@@ -228,10 +239,11 @@ function groundMaterial() {
           vec3 gSun = vec3(0.0);
         #endif`)
       .replace('#include <opaque_fragment>', /* glsl */`
-        if (vWPos.y < uWaterY) {
+        // только дно озера: окопы и воронки ниже уреза воды не заполнены
+        if (vWPos.y < uWaterY && lakeRhoT(vWPos.xz) < 1.02) {
           float dep = uWaterY - vWPos.y;
-          float cs = caustic(vWPos.xz * 0.55 + 20.0, uTime * 0.55) + caustic(vWPos.xz * 1.1 - 7.0, uTime * 0.7 + 3.0) * 0.5;
-          outgoingLight += diffuseColor.rgb * gSun * cs * 1.8 * exp(-dep * 0.8) * smoothstep(0.02, 0.2, dep);
+          float cs = caustic(vWPos.xz * 0.9, uTime * 0.8) * 0.6 + caustic(vWPos.xz * 1.7 + 3.1, uTime * 1.1) * 0.4;
+          outgoingLight += diffuseColor.rgb * gSun * cs * 0.9 * exp(-dep * 0.9) * smoothstep(0.03, 0.25, dep);
         }
         #include <opaque_fragment>`)
       .replace('#include <roughnessmap_fragment>', /* glsl */`

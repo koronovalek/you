@@ -30,6 +30,9 @@ import { SOFTS } from './core/colliders.js';
 import { lakeRho, lakeContour } from './world/layout.js';
 import { updateLife, buildLife } from './world/life.js';
 import { PERF, updatePerf, initPerf } from './core/perf.js';
+import { voxelizeLoose, VOX } from './core/voxels.js';
+import { buildLeaves, updateLeaves, leafStats } from './fx/leaves.js';
+import { buildLitter, updateLitter } from './world/litter.js';
 
 /* ============================================================================
    «ТИХИЙ БОР» — сборка сцены и главный цикл
@@ -49,9 +52,10 @@ const STEPS = [
   ['Окопы, базы, минное поле', () => buildMilitary()],
   ['Техника и укрытия', () => buildProps()],
   ['Фонари', () => { buildLamps(); finishLamps(); }],
-  ['Частицы и взрывы', () => { buildParticles(); buildExplosions(); buildLife(); }],
+  ['Частицы и взрывы', () => { buildParticles(); buildExplosions(); buildLife(); buildLeaves(); }],
+  ['Лесная подстилка', () => buildLitter()],
   ['Разрушаемость', () => buildDestruct()],
-  ['Сборка геометрии', () => { finishGrass(); bakeGroundAO(TREES, COLLIDERS); draws = flushStatic(); buildPost(); initPerf(); buildMapOverlay(); }],
+  ['Сборка геометрии', () => { finishGrass(); bakeGroundAO(TREES, COLLIDERS); draws = flushStatic(); voxelizeLoose(scene, THREE); buildPost(); initPerf(); buildMapOverlay(); }],
   ['Компиляция шейдеров', () => { spawnAt('A', 'drone'); updatePlayer(0); updateSky(0); renderer.compile(scene, camera); }]
 ];
 
@@ -88,14 +92,14 @@ function finish() {
     setTime: h => { TIME.h = h; updateSky(0); },
     teleport: (x, y, z, yaw = PL.yaw, pitch = PL.pitch) => { PL.pos.set(x, y, z); PL.vel.set(0, 0, 0); PL.yaw = yaw; PL.pitch = pitch; stopCinematic(); },
     lookAt: (x, y, z) => { const dx = x - PL.pos.x, dy = y - PL.pos.y, dz = z - PL.pos.z; PL.yaw = Math.atan2(-dx, -dz); PL.pitch = Math.atan2(dy, Math.hypot(dx, dz)); },
-    step: dt => frame(dt), explode, setMode, trees: TREES, spawnAt, startCinematic, terrainH, map: MAP, spawns: SPAWNS,
+    step: dt => frame(dt), explode, setMode, trees: TREES, trenchList: TRENCHES, spawnAt, startCinematic, terrainH, map: MAP, spawns: SPAWNS,
     // логика без отрисовки: для автотестов на медленных машинах
-    simulate: (dt, n = 1) => { for (let i = 0; i < n; i++) { FRAME.t += dt; FRAME.n++; updatePlayer(dt); updateExplosions(dt); updateDestruct(dt); updateBarrels(dt); } return PL; },
+    simulate: (dt, n = 1) => { for (let i = 0; i < n; i++) { FRAME.t += dt; FRAME.n++; updatePlayer(dt); updateExplosions(dt); updateDestruct(dt); updateBarrels(dt); updateLeaves(dt, SKY); } return PL; },
     stats: () => ({
       calls: renderer.info.render.calls, tris: renderer.info.render.triangles, grass: GRASS.count,
       ...forestStats(), colliders: COLLIDERS.length, houses: HOUSES.length, cloths: CLOTHS.length, barrels: BARRELS.length,
       mines: MINES.list.length, paths: PATHS.length, trenches: TRENCHES.length, staticDraws: draws, ...lampStats(), quality: QNAME,
-      ...bushStats(), ...destructStats(), softs: SOFTS.length, scale: PERF.scale, frameMs: PERF.ms
+      ...bushStats(), ...destructStats(), softs: SOFTS.length, voxels: VOX.cells, ...leafStats(), scale: PERF.scale, frameMs: PERF.ms
     })
   };
   $('#g_load').style.display = 'none';
@@ -184,6 +188,8 @@ function frame(dt) {
   updateUndergrowth();
   updateBushes();
   updateDestruct(dt);
+  updateLeaves(dt, SKY);
+  updateLitter();
   updateLife(dt, SKY);
   stepCloth(dt, FRAME.t);
   updateBarrels(dt);

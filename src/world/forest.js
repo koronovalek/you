@@ -542,3 +542,34 @@ export function forestStats() {
 
 /** Подрост: маленькая ель (только лапы, ствол под ними не виден). */
 export function saplingGeo() { return spruceVariant(555, 1).crown; }
+
+/** Радиус сердцевины кроны на относительной высоте y (0..1), в долях высоты дерева.
+    Берётся ~60% от видимого радиуса лап: дрон не пролетает сквозь густую
+    крону, но и не упирается в воздух у кончиков веток. */
+function crownCore(sp, y) {
+  if (sp === 'spruce') { if (y < 0.08 || y > 0.97) return 0; const t = (y - 0.08) / 0.89; return (0.26 * Math.pow(1 - t, 0.9) + 0.03) * 0.6; }
+  if (sp === 'pine') { if (y < 0.58 || y > 1.02) return 0; const t = (y - 0.58) / 0.44; return (0.2 - 0.12 * t) * Math.sin(Math.min(1, t * 3 + 0.25) * Math.PI * 0.5) * 0.6; }
+  if (y < 0.42 || y > 1.0) return 0;
+  const t = (y - 0.42) / 0.58;
+  return Math.sin(lerp(0.2, 1, 1 - t) * Math.PI * 0.8) * 0.2 * 0.45;
+}
+/** Выталкивание сферы из сердцевин крон (по горизонтали). */
+export function crownPush(p, R) {
+  let hit = false;
+  for (let i = -2; i <= 2; i++) for (let j = -2; j <= 2; j++) {
+    const L = TREE_GRID.get(tkey(p.x + i * 6, p.z + j * 6));
+    if (!L) continue;
+    for (const t of L) {
+      if (t.gone || t.dead) continue;
+      const y = (p.y - t.y) / t.h;
+      const rc = crownCore(t.sp, y) * t.h;
+      if (rc <= 0) continue;
+      const dx = p.x - t.x, dz = p.z - t.z, d = Math.hypot(dx, dz), m = rc + R;
+      if (d >= m) continue;
+      const k = d > 1e-4 ? (m - d) / d : 0;
+      if (d > 1e-4) { p.x += dx * k; p.z += dz * k; } else p.x += m;
+      hit = true;
+    }
+  }
+  return hit;
+}

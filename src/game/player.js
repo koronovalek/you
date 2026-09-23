@@ -4,6 +4,8 @@ import { clamp, lerp, smoothstep } from '../core/math.js';
 import { MAP, SPAWNS, terrainH, edgeDist, inMinefield, lakeRho, ISLAND, CLUSTERS, lakeContour, pathInfluence } from '../world/layout.js';
 import { hFast } from '../world/heightcache.js';
 import { pushOut, supportTop, ceilingAt, softAt } from '../core/colliders.js';
+import { voxPush } from '../core/voxels.js';
+import { crownPush } from '../world/forest.js';
 import { mineNear } from '../world/military.js';
 import { explode, BLAST } from '../fx/explosions.js';
 import { click, sfx } from '../fx/audio.js';
@@ -160,6 +162,28 @@ export function updatePlayer(dt) {
   updateBombs(dt);
   applyCamera(dt);
 }
+/** Дрон — сфера 0.42 м: воксели статики, коллайдеры (стволы, машины, ящики,
+    бочки) и сердцевины крон. После толчка гасится скорость в стену. */
+const _cn = new THREE.Vector3();
+function droneCollide() {
+  const R = 0.42;
+  let hit = voxPush(PL.pos, R, _cn);
+  if (hit) killNormal(_cn.x, _cn.y, _cn.z);
+  const px = PL.pos.x, pz = PL.pos.z;
+  if (pushOut(PL.pos, R, PL.pos.y - R, PL.pos.y + R)) {
+    const nx = PL.pos.x - px, nz = PL.pos.z - pz, l = Math.hypot(nx, nz);
+    if (l > 1e-5) killNormal(nx / l, 0, nz / l);
+  }
+  const cx = PL.pos.x, cz = PL.pos.z;
+  if (crownPush(PL.pos, R)) {
+    const nx = PL.pos.x - cx, nz = PL.pos.z - cz, l = Math.hypot(nx, nz);
+    if (l > 1e-5) killNormal(nx / l, 0, nz / l);
+  }
+}
+function killNormal(nx, ny, nz) {
+  const vn = PL.vel.x * nx + PL.vel.y * ny + PL.vel.z * nz;
+  if (vn < 0) { PL.vel.x -= nx * vn; PL.vel.y -= ny * vn; PL.vel.z -= nz * vn; }
+}
 function updateDrone(dt, ix, iz, boost) {
   lookV.set(-Math.sin(PL.yaw) * Math.cos(PL.pitch), Math.sin(PL.pitch), -Math.cos(PL.yaw) * Math.cos(PL.pitch));
   const sp = PL.speed * boost;
@@ -169,12 +193,11 @@ function updateDrone(dt, ix, iz, boost) {
   // инерция: разгон мягче торможения
   const k = tmp.lengthSq() > PL.vel.lengthSq() ? 2.6 : 3.8;
   PL.vel.lerp(tmp, Math.min(1, dt * k));
-  PL.pos.addScaledVector(PL.vel, dt);
-  // стволы, стены и машины твёрдые и для дрона: скользит вдоль, а не проходит насквозь
-  const px = PL.pos.x, pz = PL.pos.z;
-  if (pushOut(PL.pos, 0.38, PL.pos.y - 0.25, PL.pos.y + 0.25)) {
-    const nx = PL.pos.x - px, nz = PL.pos.z - pz, l = Math.hypot(nx, nz);
-    if (l > 1e-5) { const vn = (PL.vel.x * nx + PL.vel.z * nz) / l; if (vn < 0) { PL.vel.x -= nx / l * vn * 1.2; PL.vel.z -= nz / l * vn * 1.2; } }
+  // движение подшагами ≤ 0.15 м: на скорости дрон не проскакивает тонкую стену
+  const steps = Math.min(40, Math.max(1, Math.ceil(PL.vel.length() * dt / 0.15)));
+  for (let k = 0; k < steps; k++) {
+    PL.pos.addScaledVector(PL.vel, dt / steps);
+    droneCollide();
   }
   // земля, вода, крыши и настилы — ниже 0.4 м над опорой не опуститься
   const roof = supportTop(PL.pos.x, PL.pos.z, 0.3, PL.pos.y, 0.4);

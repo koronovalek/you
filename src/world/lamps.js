@@ -2,10 +2,11 @@ import * as THREE from 'three';
 import { scene, camera, Q, FRAME, NO_REFLECT } from '../core/env.js';
 import { rng, clamp, lerp, smoothstep, polyAt, TAU } from '../core/math.js';
 import { PATHS, terrainH, isFree, keep, lakeRho, pathInfluence } from './layout.js';
-import { hFast } from './heightcache.js';
+import { hFast, groundMin } from './heightcache.js';
 import { M, TEX } from '../gen/materials.js';
 import { box, cyl, beam, place } from './builders.js';
 import { addCircle } from '../core/colliders.js';
+import { addBreakable } from './destruct.js';
 
 /* ============================================================================
    ФОНАРИ
@@ -110,31 +111,35 @@ function buildPost(p) {
   addLamp({ kind: 'post', x: ax, y: ay - 0.22, z: az, ground: hFast(ax, az), on: p.on, flick: p.flick, lens, dir: new THREE.Vector3(0, -1, 0) });
 }
 /** Лавочка: бетонные опоры, рейки; у некоторых — выломана спинка. */
+/** Лавка у фонаря: каждая доска и опора — «спящий» обломок (см. destruct.js),
+    взрыв разбрасывает их по отдельности. */
 export function bench(x, z, rot, R) {
-  const y = hFast(x, z);
+  const y = groundMin(x, z, 0.9, 0.25, rot);
   const c = Math.cos(rot), s = Math.sin(rot);
   const P = (lx, lz) => [x + lx * c + lz * s, z - lx * s + lz * c];
+  const parts = [];
   for (const lx of [-0.75, 0.75]) {
     const [px, pz] = P(lx, 0);
-    box(M.concrete, px, y + 0.22, pz, 0.12, 0.45, 0.46, { rot, tile: 0.8 });
+    parts.push({ kind: 'concrete', x: px, y: y + 0.22, z: pz, sx: 0.12, sy: 0.45, sz: 0.46, ry: rot });
   }
   const broken = R() < 0.35;
   for (let i = 0; i < 3; i++) {
     const [px, pz] = P(0, -0.15 + i * 0.15);
     if (broken && i === 2 && R() < 0.5) continue;
-    box(M.planksDark, px, y + 0.47, pz, 1.8, 0.04, 0.11, { rot, tile: 1.2 });
+    parts.push({ kind: 'plankDark', x: px, y: y + 0.47, z: pz, sx: 1.8, sy: 0.04, sz: 0.11, ry: rot });
   }
   if (!broken) for (let i = 0; i < 2; i++) {
     const [px, pz] = P(0, -0.27);
-    box(M.planksDark, px, y + 0.68 + i * 0.16, pz, 1.8, 0.1, 0.035, { rot, rx: -0.15, tile: 1.2 });
+    parts.push({ kind: 'plankDark', x: px, y: y + 0.68 + i * 0.16, z: pz, sx: 1.8, sy: 0.1, sz: 0.035, ry: rot, rx: -0.15 });
   }
   // урна
   if (R() < 0.6) {
     const [ux, uz] = P(1.35, 0);
     cyl(M.rust, ux, y + 0.33, uz, 0.2, 0.24, 0.66, { seg: 10, open: true });
+    addCircle(ux, uz, 0.24, y, y + 0.66);
   }
   const [cx, cz] = P(0, 0);
-  addCircle(cx, cz, 0.45, y, y + 0.5);
+  addBreakable(parts, { x: cx, y: y + 0.25, z: cz, sx: 1.8, sy: 0.5, sz: 0.5, rot });
 }
 
 /* ---------- Визуальные слои света ---------- */

@@ -77,7 +77,7 @@ export function tex(canvas, rx = 1, ry = 1, srgb = true) {
   const t = new THREE.CanvasTexture(canvas);
   t.wrapS = t.wrapT = THREE.RepeatWrapping;
   t.repeat.set(rx, ry);
-  t.anisotropy = Math.min(8, MAXA());
+  t.anisotropy = Math.min(16, MAXA());
   t.colorSpace = srgb ? THREE.SRGBColorSpace : THREE.NoColorSpace;
   t.generateMipmaps = true;
   t.minFilter = THREE.LinearMipmapLinearFilter;
