@@ -122,7 +122,7 @@ export function softAt(p, r, y, dt) {
     if (d >= R) continue;
     const k = 1 - d / R;
     if (c.slow < slow + 0.2 * k) { slow = Math.min(slow, 1 - (1 - c.slow) * Math.min(1, k * 1.6)); kind = c.kind; }
-    if (d > 1e-4) { const push = (R - d) * Math.min(1, dt * 2.5); p.x += dx / d * push; p.z += dz / d * push; }
+    if (d > 1e-4) { const push = (R - d) * Math.min(1, dt * 1.2); p.x += dx / d * push; p.z += dz / d * push; }
   }
   return { slow, kind };
 }

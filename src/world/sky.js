@@ -196,12 +196,12 @@ export function updateSky(dt) {
   SKY.fogColor.copy(scene.fog.color);
   // высотный туман: основание у земли под камерой, слой ~14 м; с дрона видно дальше
   const gH = camera.position.y - agl;
-  scene.fog.density = k.fogD * lerp(1.05, 0.5, smoothstep(10, 110, agl));
-  ATMO.height.set(gH - 1.5, 1 / lerp(14, 22, night), 0.85, 0);
+  scene.fog.density = k.fogD * lerp(0.9, 0.5, smoothstep(10, 110, agl));
+  ATMO.height.set(gH - 1.5, 1 / lerp(18, 26, night), 0.6, 0);
   // дымка светится в сторону солнца (ночью — луны), сильнее всего на закате и рассвете
   ATMO.sunDir.copy(useSun ? _d : _m);
   const low = 1 - smoothstep(0.05, 0.5, Math.abs(L.y));
-  const glow = useSun ? I * (0.05 + low * 0.14) : moonUp * 0.03;
+  const glow = useSun ? I * (0.012 + low * 0.05) : moonUp * 0.015;
   ATMO.sunColor.set(dir.color.r * glow, dir.color.g * glow, dir.color.b * glow);
   renderer.toneMappingExposure = k.exp;
 

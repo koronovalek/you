@@ -14,6 +14,7 @@ import { sfx } from '../fx/audio.js';
 import { BARRELS } from './props.js';
 import { BLAST, explode } from '../fx/explosions.js';
 import { DYN_LIGHTS } from './lamps.js';
+import { leafBurst, spawnLeaf } from '../fx/leaves.js';
 
 /* ============================================================================
    РАЗРУШЕНИЯ
@@ -90,8 +91,72 @@ export function buildDestruct() {
   PIECES.crate = new Pool(box, M.crate, 260, { name: 'debris_crate' });
   PIECES.bark = new Pool(box, M.barkPine, 200, { name: 'debris_bark' });
   PIECES.metal = new Pool(box, M.burnt, 120, { name: 'debris_metal' });
+  PIECES.plankDark = new Pool(box, M.planksDark, 200, { name: 'debris_plank' });
+  PIECES.concrete = new Pool(box, M.concrete, 80, { name: 'debris_concrete' });
+  PIECES.sheet = new Pool(box, M.roofRust, 40, { name: 'debris_sheet' });
+  const logG = new THREE.CylinderGeometry(0.5, 0.5, 1, 8);
+  const luv = logG.attributes.uv; for (let i = 0; i < luv.count; i++) luv.setXY(i, luv.getX(i) * 0.3, luv.getY(i) * 0.5);
+  PIECES.log = new Pool(logG, M.barkPine, 900, { name: 'debris_log' });
   buildCrates();
+  buildBreakables();
   for (const b of BARRELS) if (b.im.material === M.barrel[1]) b.fuel = true;
+}
+
+/* ---------- Разбираемые конструкции ----------
+   Лавки, поленницы: каждая деталь — обломок в состоянии сна (стоит на месте,
+   не считается). Взрыв будит детали, и дальше их ведёт физика обломков. */
+const BREAK_QUEUE = [];
+const BREAKABLES = [];
+/** parts: [{kind, x,y,z, sx,sy,sz, rx?, ry?, rz?}], col: коллайдер-бокс {x,y,z,sx,sy,sz,rot}. */
+export function addBreakable(parts, col) { BREAK_QUEUE.push({ parts, col }); }
+function buildBreakables() {
+  for (const b of BREAK_QUEUE) {
+    const g = { parts: [], gone: false, x: b.col.x, y: b.col.y, z: b.col.z };
+    g.col = addBox(b.col.x, b.col.y, b.col.z, b.col.sx, b.col.sy, b.col.sz, b.col.rot);
+    for (const pt of b.parts) {
+      const pool = PIECES[pt.kind];
+      const slot = pool.alloc();
+      if (slot < 0) continue;
+      const piece = {
+        kind: pt.kind, slot, born: 0, perm: true, sleep: true,
+        p: new THREE.Vector3(pt.x, pt.y, pt.z), v: new THREE.Vector3(), w: new THREE.Vector3(),
+        q: new THREE.Quaternion().setFromEuler(_e.set(pt.rx ?? 0, pt.ry ?? 0, pt.rz ?? 0, 'YXZ')),
+        s: new THREE.Vector3(pt.sx, pt.sy, pt.sz), life: Infinity, rest: 99, float: pt.kind !== 'concrete' && pt.kind !== 'sheet'
+      };
+      pool.set(slot, _m.compose(piece.p, piece.q, piece.s));
+      DESTRUCT.pieces.push(piece);
+      g.parts.push(piece);
+    }
+    BREAKABLES.push(g);
+  }
+  BREAK_QUEUE.length = 0;
+}
+function wakeBreakable(g, bx, by, bz, power) {
+  g.gone = true; g.col.dead = true;
+  for (const p of g.parts) {
+    const dx = p.p.x - bx, dz = p.p.z - bz, d = Math.hypot(dx, dz) + 0.3, sp = power * sr(0.4, 1.1);
+    p.v.set(dx / d * sp + sr(-1, 1), sp * sr(0.4, 1) + 1.5, dz / d * sp + sr(-1, 1));
+    p.w.set(sr(-1, 1), sr(-1, 1), sr(-1, 1)).multiplyScalar(3 + sp);
+    p.sleep = false; p.perm = false; p.rest = 0; p.life = sr(60, 90); p.born = FRAME.t;
+  }
+  sawdust(g.x, g.y, g.z, 0.6, 50);
+  sfx('splinter', g.x, g.y, g.z, 1.2);
+}
+/** Опилки и мелкая щепа: светлое облачко и россыпь, которая ложится на землю. */
+function sawdust(x, y, z, spread, n, col = [0.62, 0.5, 0.32]) {
+  leafBurst('sawdust', x, y, z, n, spread, 3.5, col, 1.4);
+  for (let i = 0; i < 4; i++) FX.alpha.spawn({ x: x + sr(-0.3, 0.3), y: y + sr(0, 0.4), z: z + sr(-0.3, 0.3), vx: sr(-0.6, 0.6), vy: sr(0.3, 1), vz: sr(-0.6, 0.6), size: sr(0.5, 1), grow: 0.8, life: sr(1.5, 3), col: [0.7, 0.6, 0.45], a: 0.28, fadeIn: 0.1, windK: 1.2, drag: 1 });
+}
+/** Крона дерева роняет листву/хвою: n частиц из объёма кроны. */
+function shakeCrown(t, n, speed) {
+  if (t.dead) return;
+  const leaf = t.sp === 'birch';
+  const col = leaf ? (srnd() < 0.3 ? [0.55, 0.5, 0.12] : [0.3, 0.42, 0.1]) : t.sp === 'pine' ? [0.2, 0.28, 0.1] : [0.14, 0.22, 0.09];
+  for (let i = 0; i < n; i++) {
+    const hy = sr(t.sp === 'spruce' ? 0.2 : 0.55, 0.95), rad = t.h * (t.sp === 'spruce' ? 0.22 * (1 - hy) + 0.03 : 0.12) * Math.sqrt(srnd());
+    const a = srnd() * TAU;
+    spawnLeaf(leaf ? 'leaf' : 'needle', t.x + Math.cos(a) * rad, t.y + hy * t.h, t.z + Math.sin(a) * rad, Math.cos(a) * speed * srnd(), srnd() * speed * 0.5, Math.sin(a) * speed * srnd(), srnd() < 0.15 ? [0.45, 0.32, 0.12] : col);
+  }
 }
 
 /* ---------- Ящики ---------- */
@@ -169,6 +234,7 @@ function breakCrate(c, bx, by, bz, power) {
   }
   for (let i = 0; i < 10; i++) spawnPiece('wood', c.x, c.y, c.z, sr(0.05, 0.2), 0.02, 0.03, bx, by, bz, power * 1.6);
   dust(c.x, c.y, c.z, 6, [0.42, 0.37, 0.3]);
+  sawdust(c.x, c.y, c.z, 0.4, 60);
   sfx('splinter', c.x, c.y, c.z, 1);
 }
 function updateCrates(dt) {
@@ -191,7 +257,7 @@ function spawnPiece(kind, x, y, z, sx, sy, sz, bx, by, bz, power, rot = srnd() *
   if (slot < 0) {
     // пул полон — переиспользуем самый старый обломок того же вида
     let old = null;
-    for (const p of DESTRUCT.pieces) if (!p.dead && p.kind === kind && (!old || p.born < old.born)) old = p;
+    for (const p of DESTRUCT.pieces) if (!p.dead && !p.perm && p.kind === kind && (!old || p.born < old.born)) old = p;
     if (!old) return;
     slot = old.slot; old.dead = true;
   }
@@ -210,7 +276,7 @@ function spawnPiece(kind, x, y, z, sx, sy, sz, bx, by, bz, power, rot = srnd() *
 function updatePieces(dt) {
   const P = DESTRUCT.pieces;
   for (const p of P) {
-    if (p.dead) continue;
+    if (p.dead || p.sleep) continue;
     p.life -= dt;
     if (p.life <= 0) { p.dead = true; PIECES[p.kind].set(p.slot, _zero); continue; }
     if (p.rest > 1.2 && p.life > 2) continue;
@@ -296,6 +362,9 @@ function fell(t, bx, bz, power) {
   }
   addCircle(t.x, t.z, rS * 0.9, t.y, t.y + bh + 0.15);
   const cx = t.x, cy = f.pivot.y, cz = t.z;
+  sawdust(cx, cy, cz, 0.35, 90, t.sp === 'birch' ? [0.72, 0.64, 0.5] : [0.66, 0.5, 0.3]);
+  leafBurst('bark', cx, cy, cz, 25, 0.3, 4, t.sp === 'birch' ? [0.8, 0.78, 0.72] : [0.35, 0.22, 0.14]);
+  shakeCrown(t, 60, 2);
   for (let i = 0; i < 14; i++) spawnPiece(i < 9 ? 'wood' : 'bark', cx + sr(-0.2, 0.2), cy, cz + sr(-0.2, 0.2), sr(0.04, 0.25), sr(0.02, 0.04), sr(0.03, 0.08), bx, cy - 0.5, bz, 6);
   dust(cx, cy, cz, 5, [0.5, 0.42, 0.32]);
   sfx('crack', cx, cy, cz, clamp(t.h / 18, 0.4, 1.2));
@@ -351,6 +420,14 @@ function impact(f) {
     const r = sr(0.4, 0.95) * L, x = f.pivot.x + f.dir.x * r, z = f.pivot.z + f.dir.z * r;
     spawnPiece('bark', x, hFast(x, z) + 0.8, z, sr(0.3, 0.9), 0.04, 0.05, x - f.dir.x, hFast(x, z), z - f.dir.z, 3);
   }
+  // удар кроны: облако листвы и хвои вдоль ствола
+  if (!f.t.dead) {
+    const leaf = f.t.sp === 'birch';
+    for (let i = 0; i < 12; i++) {
+      const r = sr(0.4, 1) * L, x = f.pivot.x + f.dir.x * r, z = f.pivot.z + f.dir.z * r;
+      leafBurst(leaf ? 'leaf' : 'needle', x, hFast(x, z) + sr(0.5, 2), z, 14, 1.5, 3, leaf ? [0.32, 0.44, 0.1] : [0.15, 0.23, 0.09], 1.5);
+    }
+  }
   const mx = f.pivot.x + f.dir.x * L * 0.6, mz = f.pivot.z + f.dir.z * L * 0.6;
   shredUndergrowth(mx, mz, 1.8);
   shredBushes(mx, mz, 2.2, f.pivot.x, f.pivot.z, 0.5);
@@ -398,6 +475,16 @@ function dust(x, y, z, n, col) {
 /** Взрыв: что сломать, что поджечь, что срезать. */
 export function blastDestruct(x, y, z, size, kind) {
   const R = 2.4 + 2.6 * size;
+  // ударная волна стряхивает листву и хвою с крон вокруг
+  for (const t of treesNear(x, z, R * 3)) {
+    const d = Math.hypot(t.x - x, t.z - z);
+    shakeCrown(t, Math.round(40 * size * (1 - d / (R * 3))), 2.5 * size);
+  }
+  for (const g of BREAKABLES) {
+    if (g.gone) continue;
+    const d = Math.hypot(g.x - x, g.z - z);
+    if (d < 2.4 + 2.4 * size) wakeBreakable(g, x, y, z, 8 * size * (1 - d / (2.6 + 2.4 * size)) + 2);
+  }
   // деревья: тонкие ломаются дальше от центра, толстые — только вплотную
   for (const t of treesNear(x, z, R + 1)) {
     const d = Math.hypot(t.x - x, t.z - z);
@@ -421,6 +508,9 @@ export function blastDestruct(x, y, z, size, kind) {
   const cutB = shredBushes(x, z, 1.6 + size * 1.5, x, z, size);
   const cutR = shredReeds(x, z, 1.5 + size * 1.4);
   for (const c of [...cut, ...cutB, ...cutR]) {
+    const gy0 = hFast(c.x, c.z);
+    if (c.kind === 'bush' || c.kind === 'sapling') leafBurst(c.kind === 'bush' ? 'leaf' : 'needle', c.x, gy0 + 1, c.z, 30, 0.8, 5, c.kind === 'bush' ? [0.28, 0.4, 0.1] : [0.14, 0.22, 0.09], 1.3);
+    if (c.kind === 'reed') leafBurst('needle', c.x, Math.max(gy0, MAP.WATER_Y) + 0.8, c.z, 8, 0.5, 4, [0.4, 0.4, 0.18], 1.3);
     const n = c.kind === 'sapling' || c.kind === 'bush' ? 7 : 3;
     const gy = hFast(c.x, c.z), dx = c.x - x, dz = c.z - z, dd = Math.hypot(dx, dz) + 0.3;
     for (let i = 0; i < n; i++) {

@@ -66,7 +66,10 @@ const RAYS_COMP = `
     vec4 c = texture2D(tColor, vUv);
     // санитайзер: NaN и бесконечности из HDR — в ноль/предел
     if (!(c.r == c.r) || !(c.g == c.g) || !(c.b == c.b)) c = vec4(0.0, 0.0, 0.0, 1.0);
-    c.rgb = min(c.rgb, vec3(60.0));
+    // потолок яркости по светимости (оттенок сохраняется): ни один пиксель
+    // не разольётся блумом на пол-экрана
+    float lm = max(max(c.r, c.g), c.b);
+    if (lm > 10.0) c.rgb *= 10.0 / lm;
     float r = texture2D(tRays, vUv).r;
     c.rgb += uCol * r;
     gl_FragColor = c;
@@ -136,7 +139,7 @@ export function updatePost(sky, hit) {
   const facing = Math.max(0, _cf.dot(sky.sunDir));
   const edge = Math.max(0, 1 - Math.max(Math.abs(_sp.x), Math.abs(_sp.y)) / 1.6);
   rays.sun.set(_sp.x * 0.5 + 0.5, _sp.y * 0.5 + 0.5);
-  rays.strength = Q.bloom ? Math.pow(facing, 1.5) * edge * Math.min(1, sky.sunDir.y * 6 + 0.2) * (1 - sky.night) * 0.55 : 0;
+  rays.strength = Q.bloom ? Math.pow(facing, 2) * edge * Math.min(1, sky.sunDir.y * 6 + 0.2) * (1 - sky.night) * 0.22 : 0;
   rays.color = sky.sunColor;
   grade.uniforms.uNight.value = sky.night;
   grade.uniforms.uSat.value = lerp(1.06, 0.88, sky.night);
@@ -144,8 +147,10 @@ export function updatePost(sky, hit) {
   grade.uniforms.uT.value = FRAME.t % 100;
   grade.uniforms.uHit.value = hit;
   grade.uniforms.uWarm.value = 1 - sky.night;
-  bloom.strength = lerp(0.26, 0.85, sky.night);
-  bloom.threshold = lerp(0.9, 0.62, sky.night);
+  // днём блум почти только от бликов; ночью мягче вокруг фонарей
+  bloom.strength = lerp(0.14, 0.6, sky.night);
+  bloom.threshold = lerp(1.6, 0.75, sky.night);
+  bloom.radius = lerp(0.35, 0.55, sky.night);
 }
 export function resizePost() {
   composer.setSize(innerWidth, innerHeight);

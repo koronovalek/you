@@ -2,6 +2,7 @@ import * as THREE from 'three';
 import * as BGU from 'three/addons/utils/BufferGeometryUtils.js';
 import { scene } from '../core/env.js';
 import { addBox } from '../core/colliders.js';
+import { voxelize } from '../core/voxels.js';
 
 /* ============================================================================
    СТАТИЧЕСКАЯ ГЕОМЕТРИЯ
@@ -93,6 +94,8 @@ export function flushStatic() {
     const merged = BGU.mergeGeometries(list, false);
     if (!merged) { console.warn('merge failed', mat); continue; }
     merged.computeBoundingSphere();
+    // сетки и ткань маскировки не держат дрон; остальное — твёрдое
+    if (!mat.alphaTest) voxelize(merged.attributes.position.array);
     const mesh = new THREE.Mesh(merged, mat);
     mesh.castShadow = k < 100000 - 5000;
     mesh.receiveShadow = true;

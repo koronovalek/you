@@ -19,12 +19,38 @@ import { COLLIDERS } from '../core/colliders.js';
 export const GRASS = { tiers: [], count: 0, tex: null };
 
 const TIERS = {
-  low: [{ S: 0.42, R0: 0, R1: 10, blades: 5, segs: 3 }, { S: 1.0, R0: 9, R1: 26, blades: 4, segs: 2 }],
-  medium: [{ S: 0.36, R0: 0, R1: 13, blades: 6, segs: 3 }, { S: 0.85, R0: 12, R1: 36, blades: 4, segs: 2 }],
-  high: [{ S: 0.31, R0: 0, R1: 16, blades: 7, segs: 4 }, { S: 0.74, R0: 15, R1: 48, blades: 5, segs: 2 }]
+  low: [{ S: 0.42, R0: 0, R1: 10, blades: 5, segs: 3 }, { S: 1.0, R0: 9, R1: 26, blades: 4, segs: 2 }, { S: 1.6, R0: 0, R1: 16, flower: true }],
+  medium: [{ S: 0.34, R0: 0, R1: 14, blades: 7, segs: 3 }, { S: 0.82, R0: 13, R1: 38, blades: 5, segs: 2 }, { S: 1.25, R0: 0, R1: 24, flower: true }],
+  high: [{ S: 0.29, R0: 0, R1: 18, blades: 8, segs: 4 }, { S: 0.7, R0: 17, R1: 52, blades: 5, segs: 3 }, { S: 1.0, R0: 0, R1: 30, flower: true }]
 };
 
-/** Геометрия пучка: travинки как ленты. aB — (смещение x,z, поворот, случайность), aV — (t, сторона). */
+/** Цветок: стебель-лента и венчик из двух скрещённых квадов на верхушке.
+    aH — (смещение по стороне, по высоте, 1 = венчик). */
+function flowerGeometry() {
+  const pos = [], aB = [], aV = [], aH = [], idx = [];
+  const segs = 3;
+  for (let k = 0; k <= segs; k++) for (const s of k < segs ? [-1, 1] : [0]) { pos.push(0, k / segs, 0); aB.push(0, 0, 0, 0.5); aV.push(k / segs, s); aH.push(0, 0, 0); }
+  for (let k = 0; k < segs - 1; k++) { const i = k * 2; idx.push(i, i + 1, i + 2, i + 1, i + 3, i + 2); }
+  idx.push((segs - 1) * 2, (segs - 1) * 2 + 1, segs * 2);
+  for (let q = 0; q < 2; q++) {
+    const base = pos.length / 3;
+    for (const [u, v] of [[-1, -1], [1, -1], [-1, 1], [1, 1]]) { pos.push(0, 1, 0); aB.push(0, 0, q * 1.5708, 0.5); aV.push(1, 0); aH.push(u, v, 1); }
+    idx.push(base, base + 1, base + 2, base + 1, base + 3, base + 2);
+  }
+  // горизонтальный диск венчика — видно сверху
+  const base = pos.length / 3;
+  for (const [u, v] of [[-1, -1], [1, -1], [-1, 1], [1, 1]]) { pos.push(0, 1, 0); aB.push(0, 0, 0, 0.5); aV.push(1, 0); aH.push(u, v, 2); }
+  idx.push(base, base + 1, base + 2, base + 1, base + 3, base + 2);
+  const g = new THREE.InstancedBufferGeometry();
+  g.setAttribute('position', new THREE.Float32BufferAttribute(pos, 3));
+  g.setAttribute('aB', new THREE.Float32BufferAttribute(aB, 4));
+  g.setAttribute('aV', new THREE.Float32BufferAttribute(aV, 2));
+  g.setAttribute('aH', new THREE.Float32BufferAttribute(aH, 3));
+  g.setIndex(idx);
+  return g;
+}
+
+/** Геометрия пучка: травинки как ленты. aB — (смещение x,z, поворот, случайность), aV — (t, сторона). */
 function clumpGeometry(blades, segs, spread, seed) {
   const R = rng(seed);
   const pos = [], aB = [], aV = [], idx = [];
@@ -56,6 +82,9 @@ const GRASS_VS = /* glsl */`
   attribute vec4 aB;
   attribute vec2 aV;
   attribute vec2 aCell;
+  #ifdef FLOWER
+    attribute vec3 aH;
+  #endif
   uniform sampler2D uHeight, uDens;
   uniform vec4 uHM, uDM;            // x0, 1/(шаг·N), полтекселя: высоты и плотность
   uniform vec3 uCamG;               // камера (x, z) и высота над землёй
@@ -86,6 +115,10 @@ const GRASS_BEGIN = /* glsl */`
   float fade = smoothstep(uR1, uR1 * 0.8, dist) * step(uR0, edge) * (uR0 > 0.0 ? 1.0 : step(edge, uR1));
   float dens = dn.r * uDensK;
   float sc = smoothstep(h3, h3 + 0.12, dens) * fade;
+  #ifdef FLOWER
+    // цветы: на открытых местах, не под пологом и не на сухой минной полосе
+    sc *= step(0.55, h4) * (1.0 - smoothstep(0.35, 0.6, dn.g)) * step(0.25, dn.r);
+  #endif
   // бурьян на минной полосе, сочная высокая трава у воды
   float e = max(abs(base.x), abs(base.y));
   float mine = step(${(MAP.PLAY - 2).toFixed(1)}, e) * step(e, ${MAP.FENCE.toFixed(1)});
@@ -98,12 +131,20 @@ const GRASS_BEGIN = /* glsl */`
   float ca = cos(h2 * 6.2831), sa = sin(h2 * 6.2831);
   vec2 off = vec2(aB.x * ca - aB.y * sa, aB.x * sa + aB.y * ca) * (0.8 + tall * 0.25);
   float bh = (0.34 + 0.5 * h2 * h2 + 0.25 * gn(base * 0.21)) * tall * (0.62 + 0.55 * rnd) * sc;
+  #ifdef FLOWER
+    float species = floor(fract(h1 * 7.31 + gn(base * 0.06) * 2.0) * 5.0);   // куртинами
+    bh = (species > 3.5 ? 0.75 + 0.35 * h2 : 0.28 + 0.3 * h2) * sc;
+    mine = 0.0;
+  #endif
   float t = aV.x;
   vec2 fdir = vec2(cos(ang), sin(ang));
   vec2 side = vec2(-fdir.y, fdir.x);
   float w = uWidth * (1.0 - t * 0.88) * (0.75 + 0.5 * fract(rnd * 7.13)) * (0.8 + tall * 0.2) * min(sc * 3.0, 1.0);
   vec3 gp = vec3(base.x + off.x, 0.0, base.y + off.y);
   gp.xz += side * aV.y * w * 0.5;
+  #ifdef FLOWER
+    gp.xz = base + off * 0.3 + side * aV.y * w * 0.5;
+  #endif
   float lean = 0.18 + 0.55 * fract(rnd * 3.7);
   gp.y = t * bh;
   gp.xz += fdir * lean * t * t * bh * 0.55;
@@ -130,6 +171,15 @@ const GRASS_BEGIN = /* glsl */`
   if (wl > 1.2) wd *= 1.2 / wl;
   gp.xz += wd * wk;
   gp.y -= min(dot(wd, wd), 1.4) * wk * 0.32;
+  #ifdef FLOWER
+    // венчик на верхушке: крест из двух квадов + диск
+    float hs = (species > 3.5 ? 0.028 : 0.04 + 0.02 * h3) * min(sc * 3.0, 1.0);
+    if (aH.z > 1.5) { gp.xz += vec2(aH.x, aH.y) * hs; gp.y += 0.004; }
+    else if (aH.z > 0.5) {
+      vec2 fs = vec2(cos(aB.z + ang), sin(aB.z + ang));
+      gp.xz += fs * aH.x * hs; gp.y += aH.y * hs * (species > 3.5 ? 3.0 : 0.6);
+    }
+  #endif
   vec2 gxz = gp.xz;
   float gy = texture2D(uHeight, (gxz - uHM.x) * uHM.y + uHM.z).r;
   gp.y += gy - 0.04;
@@ -138,6 +188,16 @@ const GRASS_BEGIN = /* glsl */`
   vec3 hay = mix(vec3(0.11, 0.09, 0.04), vec3(0.42, 0.34, 0.15), t);
   vColor = mix(lush, hay, dry) * (0.78 + 0.44 * h3) * mix(0.35, 1.0, smoothstep(0.0, 0.55, t));
   vColor *= mix(1.0, 0.8, dn.g);
+  // колоски: у части травинок тёмные метёлки на кончиках
+  vColor = mix(vColor, vec3(0.2, 0.15, 0.08) * (0.8 + 0.4 * h3), step(0.82, fract(rnd * 13.7 + h4)) * smoothstep(0.82, 0.97, t) * (0.4 + dry * 0.6));
+  #ifdef FLOWER
+    if (aH.z > 0.5) {
+      // ромашка, лютик, клевер, колокольчик, иван-чай
+      vec3 pc = species < 0.5 ? vec3(0.85, 0.85, 0.8) : species < 1.5 ? vec3(0.8, 0.62, 0.03) : species < 2.5 ? vec3(0.5, 0.16, 0.3) : species < 3.5 ? vec3(0.24, 0.24, 0.62) : vec3(0.62, 0.16, 0.42);
+      float ctr = aH.z > 1.5 ? 1.0 - step(0.35, length(vec2(aH.x, aH.y))) : 0.0;
+      vColor = mix(pc, vec3(0.75, 0.55, 0.05), ctr * step(species, 0.5)) * (0.85 + 0.3 * h3);
+    }
+  #endif
   vT = t;
   vec3 bn = normalize(vec3(fdir.x, 0.0, fdir.y) * (1.0 - t * 0.5) + vec3(wd.x, 0.0, wd.y) * 0.3);
   vec3 objectNormal = normalize(mix(bn, vec3(0.0, 1.0, 0.0), 0.55));
@@ -145,6 +205,7 @@ const GRASS_BEGIN = /* glsl */`
 
 function grassMaterial(tier) {
   const m = new THREE.MeshLambertMaterial({ color: 0xffffff, side: THREE.DoubleSide, vertexColors: true });
+  if (tier.flower) m.defines = { FLOWER: '' };
   const U = GRASS.uniforms;
   m.onBeforeCompile = sh => {
     Object.assign(sh.uniforms, windUniforms, U, {
@@ -164,7 +225,7 @@ function grassMaterial(tier) {
           reflectedLight.directDiffuse += diffuseColor.rgb * directLight.color * (back * 1.6 + 0.12) * vT;
         #endif`);
   };
-  m.customProgramCacheKey = () => 'grass-gpu-' + tier.S;
+  m.customProgramCacheKey = () => 'grass-gpu-' + tier.S + (tier.flower ? 'f' : '');
   return m;
 }
 
@@ -189,8 +250,8 @@ export function buildGrass() {
   for (const [i, t] of tiers.entries()) {
     const tier = { ...t, G: Math.ceil(t.R1 * 2 / t.S) + 1, camCell: { value: new THREE.Vector2() } };
     tier.densK = i === 0 ? 1.0 : 0.95;
-    tier.width = i === 0 ? 0.045 : 0.085;
-    const geo = clumpGeometry(t.blades, t.segs, i === 0 ? 0.13 : 0.3, 700 + i);
+    tier.width = t.flower ? 0.01 : i === 0 ? 0.042 : 0.08;
+    const geo = t.flower ? flowerGeometry() : clumpGeometry(t.blades, t.segs, i === 0 ? 0.13 : 0.3, 700 + i);
     const cells = new Float32Array(tier.G * tier.G * 2);
     for (let j = 0, k = 0; j < tier.G; j++) for (let q = 0; q < tier.G; q++) { cells[k++] = q; cells[k++] = j; }
     geo.setAttribute('aCell', new THREE.InstancedBufferAttribute(cells, 2));
